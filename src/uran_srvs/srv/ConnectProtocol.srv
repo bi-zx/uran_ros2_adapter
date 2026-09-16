@@ -1,0 +1,6 @@
+# 控制协议连接/断开
+string  protocol           # 协议名称
+string  action             # "connect" | "disconnect"
+---
+bool    success            # 是否成功
+string  message            # 结果描述

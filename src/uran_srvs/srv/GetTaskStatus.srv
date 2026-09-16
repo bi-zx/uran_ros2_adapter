@@ -1,0 +1,4 @@
+# 查询任务状态
+string  task_id            # 任务 ID
+---
+string  status_json        # 任务状态（JSON 序列化）

@@ -1,0 +1,5 @@
+# 运行时重载配置
+string  config_path        # 配置文件路径
+---
+bool    success            # 是否成功
+string  message            # 结果描述

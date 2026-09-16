@@ -1,0 +1,9 @@
+# 运行时修改状态上报周期与协议
+uint32  interval_ms        # 新的上报周期（0 表示不修改）
+string  protocol           # 新的首选协议（空串表示不修改）
+bool    report_on_change   # 是否开启变更即时上报
+---
+bool    success            # 是否成功
+string  message            # 结果描述
+uint32  current_interval_ms  # 当前上报周期
+string  current_protocol     # 当前首选协议

@@ -1,0 +1,3 @@
+# 查询当前各协议网络连接状态
+---
+string  protocol_table_json  # 协议通路表（JSON 序列化）

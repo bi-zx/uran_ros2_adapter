@@ -1,0 +1,3 @@
+# 查询当前已注册的传感器列表
+---
+string  sensors_json       # 传感器列表（JSON 序列化）

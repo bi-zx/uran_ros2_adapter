@@ -1,0 +1,5 @@
+# 查询状态空间字段
+string[] field_names       # 要查询的字段名列表
+---
+string  fields_json        # 查询结果（JSON 序列化）
+bool    success            # 是否成功

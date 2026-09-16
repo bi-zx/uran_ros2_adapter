@@ -1,0 +1,6 @@
+# 运行时切换运控指令转换插件
+string  plugin_id          # 目标插件 ID
+---
+bool    success            # 是否成功
+string  message            # 结果描述
+string  current_plugin     # 当前激活的插件 ID

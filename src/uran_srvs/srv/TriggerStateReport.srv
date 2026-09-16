@@ -1,0 +1,5 @@
+# 手动触发一次即时状态快照上报
+string  reason             # 触发原因描述（可空）
+---
+bool    success            # 是否成功
+string  message            # 结果描述

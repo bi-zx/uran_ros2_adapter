@@ -1,0 +1,7 @@
+# 同步写入状态空间字段
+string  field_name         # 字段名
+string  value_json         # JSON 序列化值
+bool    persistent         # 是否持久化写入
+---
+bool    success            # 是否成功
+string  message            # 结果描述
