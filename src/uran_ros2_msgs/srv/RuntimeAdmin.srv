@@ -1,0 +1,8 @@
+# Generic Runtime administration. Lifecycle start/stop uses ROS lifecycle services.
+string operation
+string instance_id
+string plugin_json
+---
+bool success
+string message
+string result_json

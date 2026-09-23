@@ -6,7 +6,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """启动 Runtime，并加载框架示例插件。"""
+    """Start the generic lifecycle Runtime host with an empty assembly."""
     share = Path(get_package_share_directory("uran_bringup"))
 
     return LaunchDescription([
@@ -16,7 +16,6 @@ def generate_launch_description():
             name="uran_runtime",
             output="screen",
             parameters=[{
-                "route_config": str(share / "config" / "routes.yaml"),
                 "plugin_config": str(share / "config" / "plugins.yaml"),
                 "snapshot_period_ms": 1000,
                 "heartbeat_period_ms": 5000,

@@ -1,0 +1,15 @@
+default_device_id: robot_001
+primary_protocol_instance: test_protocol
+plugins:
+  - instance_id: test_protocol
+    component_id: communication
+    plugin_type: protocol
+    class_type: uran_ros2_test_plugin/LoopbackProtocol
+    api_version: "2.1"
+    priority: 100
+  - instance_id: test_motion
+    component_id: base
+    plugin_type: message
+    class_type: uran_ros2_test_plugin/ContractSink
+    api_version: "2.1"
+    priority: 100

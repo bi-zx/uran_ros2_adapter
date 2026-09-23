@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>uran_ros2_adapter</name>
+  <version>2.1.0</version>
+  <description>ROS 2 lifecycle host, bridge, platform services and pluginlib loader for URAN.</description>
+  <maintainer email="dev@example.com">URAN Dev</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>lifecycle_msgs</depend>
+  <depend>nlohmann_json</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>uran_core_framework</depend>
+  <depend>uran_interfaces</depend>
+  <depend>uran_msgs</depend>
+  <depend>uran_platform_native</depend>
+  <depend>uran_plugin_api</depend>
+  <depend>uran_ros2_msgs</depend>
+  <depend>uran_srvs</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

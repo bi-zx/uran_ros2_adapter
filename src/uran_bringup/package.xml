@@ -12,7 +12,6 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>uran_core_example_plugins</exec_depend>
   <exec_depend>uran_ros2_adapter</exec_depend>
 
   <export>

@@ -1,0 +1,12 @@
+<library path="uran_ros2_test_plugins">
+  <class name="uran_ros2_test_plugin/LoopbackProtocol"
+    type="uran_ros2_test_plugin::LoopbackProtocol"
+    base_class_type="uran_plugin_api::Plugin">
+    <description>Transport-free loopback used only by adapter tests.</description>
+  </class>
+  <class name="uran_ros2_test_plugin/ContractSink"
+    type="uran_ros2_test_plugin::ContractSink"
+    base_class_type="uran_plugin_api::Plugin">
+    <description>Contract sink used only by adapter tests.</description>
+  </class>
+</library>

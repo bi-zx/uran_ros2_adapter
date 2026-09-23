@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>uran_ros2_test_plugin</name>
+  <version>1.0.0</version>
+  <description>Neutral pluginlib exports for URAN ROS 2 adapter tests.</description>
+  <maintainer email="dev@example.com">URAN Dev</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>nlohmann_json</depend>
+  <depend>pluginlib</depend>
+  <depend>uran_plugin_api</depend>
+  <depend>uran_ros2_adapter</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
