@@ -270,7 +270,7 @@ struct Ros2RuntimeHost::Impl
   {
     if (!runtime) {return;}
     const auto state = runtime->state_snapshot();
-    publish_text(snapshot, state);
+    publish_text(snapshot, runtime->state_snapshot_document());
     uran_msgs::msg::StateSnapshot legacy;
     legacy.msg_version = "1.0";
     legacy.timestamp_ns = clock_ns(node);

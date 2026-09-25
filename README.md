@@ -25,3 +25,9 @@ this repository and `uran_profiles` is the deferred deployment repository.
 hardware-free pluginlib/contract smoke test. The generic bringup assembly is
 intentionally empty; a deployment profile supplies manifests and component
 instances.
+
+The latched `/uran/runtime/state_snapshot` String topic carries the component
+aware Runtime snapshot. Its `components` array contains every loaded
+`component_id`, groups multiple `instance_id` values under the same component,
+and retains components that have no state fields. The legacy
+`/uran/core/state/broadcast` message remains flat for old consumers.
