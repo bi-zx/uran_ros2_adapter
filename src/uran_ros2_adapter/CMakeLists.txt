@@ -16,6 +16,11 @@ find_package(uran_platform_native 2.1 REQUIRED CONFIG)
 find_package(uran_plugin_api 2.1 REQUIRED CONFIG)
 find_package(uran_ros2_msgs REQUIRED)
 find_package(uran_srvs REQUIRED)
+set(URAN_FILESYSTEM_LIBS)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 8)
+  list(APPEND URAN_FILESYSTEM_LIBS stdc++fs)
+endif()
 
 add_library(${PROJECT_NAME} SHARED
   src/conversions.cpp
@@ -31,7 +36,7 @@ target_link_libraries(${PROJECT_NAME}
   uran::uran_core_framework
   uran::uran_platform_native
   uran::uran_plugin_api
-  uran_interfaces::uran_interfaces
+  uran_interfaces::uran_interfaces ${URAN_FILESYSTEM_LIBS}
   nlohmann_json::nlohmann_json)
 ament_target_dependencies(${PROJECT_NAME}
   lifecycle_msgs pluginlib rclcpp rclcpp_lifecycle std_msgs std_srvs

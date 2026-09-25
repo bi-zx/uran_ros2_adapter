@@ -114,10 +114,17 @@ Json legacy_media_to_contract(const uran_msgs::msg::MediaCtrlCmd & message,
   const std::string & device_id, const std::string & component_id, std::uint64_t sequence)
 {
   const auto session = message.channel_id.empty() ? "legacy-default" : message.channel_id;
+  // The legacy API uses offer/answer/candidate as actions, while the
+  // contract represents all signaling updates as a switch carrying a signal
+  // object. Keep the conversion aligned with the MQTT codec.
+  auto action = message.action;
+  if (action == "offer" || action == "answer" || action == "candidate" || action == "signal") {
+    action = "switch";
+  }
   Json result{{"schema_version", "1.0"},
     {"operation_id", operation_id("media", message.timestamp_ns, sequence)},
     {"target", target(device_id, component_id, "media.session")}, {"session_id", session},
-    {"action", message.action}, {"protocol", message.protocol},
+    {"action", action}, {"protocol", message.protocol},
     {"channel_id", message.channel_id}, {"timestamp_ns", message.timestamp_ns}};
   const auto signal = parse_object(message.signal_json, "signal_json");
   if (!signal.empty()) {result["signal"] = signal;}

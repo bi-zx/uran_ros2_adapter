@@ -3,7 +3,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#if __has_include(<filesystem>)
 #include <filesystem>
+namespace uran_fs = std::filesystem;
+#else
+#include <experimental/filesystem>
+namespace uran_fs = std::experimental::filesystem;
+#endif
 #include <functional>
 #include <map>
 #include <mutex>
@@ -595,11 +601,11 @@ Ros2RuntimeHost::CallbackReturn Ros2RuntimeHost::on_configure(const rclcpp_lifec
       manifests.insert(manifest);
     }
     if (impl_->assembly["plugin_manifests"]) {
-      const auto base = config_file.empty() ? std::filesystem::current_path() :
-        std::filesystem::absolute(config_file).parent_path();
+      const auto base = config_file.empty() ? uran_fs::current_path() :
+        uran_fs::absolute(config_file).parent_path();
       for (const auto & manifest : impl_->assembly["plugin_manifests"]) {
-        const auto path = std::filesystem::path(manifest.as<std::string>());
-        manifests.insert((path.is_absolute() ? path : base / path).lexically_normal().string());
+        const auto path = uran_fs::path(manifest.as<std::string>());
+        manifests.insert((path.is_absolute() ? path : base / path).string());
       }
     }
     for (const auto & manifest : manifests) {
