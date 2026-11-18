@@ -31,3 +31,15 @@ aware Runtime snapshot. Its `components` array contains every loaded
 `component_id`, groups multiple `instance_id` values under the same component,
 and retains components that have no state fields. The legacy
 `/uran/core/state/broadcast` message remains flat for old consumers.
+
+
+The dispatch topic also accepts `uran.sensors.observation.v1` using
+`sensors/observation.schema.json`. The document names the sensor source. The ROS
+envelope selects the destination worker and supplies a unique correlation ID.
+The destination must register the observation message type.
+
+`ros2 run uran_ros2_adapter map_observations` publishes mapped poses, base-frame
+scans and depth rays from standard ROS topics. Its ROS parameters select frames,
+topics and the destination. An external SLAM system supplies a map ID and TF.
+Products that manage SLAM sessions or use vendor measurements can supply a
+`slam_adapter` or `sensor_adapter` Python factory as `module:callable`.

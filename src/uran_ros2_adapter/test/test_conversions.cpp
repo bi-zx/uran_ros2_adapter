@@ -79,3 +79,22 @@ TEST(Conversions, legacy_zero_timestamp_uses_receive_time_and_maps_metadata)
   EXPECT_EQ(document.at("metadata").at("source"), "autotask");
   EXPECT_TRUE(document.at("metadata").at("legacy_extra").at("other"));
 }
+
+TEST(Conversions, observation_document_and_delivery_target_are_independent)
+{
+  uran_ros2_msgs::msg::ContractEnvelope message;
+  message.message_type = uran_ros2_adapter::kObservationMessageType;
+  message.schema_name = uran_ros2_adapter::schema_for_message_type(message.message_type);
+  ASSERT_EQ(message.schema_name, "sensors/observation.schema.json");
+  message.device_id = "robot";
+  message.component_id = "base";
+  message.instance_id = "navigation";
+  message.correlation_id = "scan-12";
+  message.payload_json = R"({"schema_version":"1.0","source":{"device_id":"robot","component_id":"lidar"},"observation_type":"laser_scan","timestamp_ns":12,"value":{}})";
+  uran_interfaces::ContractValidator validator(uran_interfaces::default_schema_directory());
+  validator.validate_or_throw(message.schema_name, nlohmann::json::parse(message.payload_json));
+  const auto routed = uran_ros2_adapter::to_api_envelope(message);
+  EXPECT_EQ(routed.target.instance_id, "navigation");
+  EXPECT_EQ(routed.correlation_id, "scan-12");
+  EXPECT_EQ(nlohmann::json::parse(routed.payload)["source"]["component_id"], "lidar");
+}

@@ -50,6 +50,7 @@ std::string schema_for_message_type(const std::string & message_type)
   if (message_type == kMotionMessageType) {return "motion/command.schema.json";}
   if (message_type == kTaskMessageType) {return "tasks/command.schema.json";}
   if (message_type == kMediaMessageType) {return "media/session-command.schema.json";}
+  if (message_type == kObservationMessageType) {return "sensors/observation.schema.json";}
   if (message_type == kCancelMessageType) {return "operations/cancel.schema.json";}
   if (message_type == "uran.operations.state.v1") {return "operations/state.schema.json";}
   return {};

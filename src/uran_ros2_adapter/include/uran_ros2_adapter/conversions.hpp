@@ -18,6 +18,7 @@ namespace uran_ros2_adapter
 inline constexpr const char * kMotionMessageType = "uran.motion.command.v1";
 inline constexpr const char * kTaskMessageType = "uran.tasks.command.v1";
 inline constexpr const char * kMediaMessageType = "uran.media.session-command.v1";
+inline constexpr const char * kObservationMessageType = "uran.sensors.observation.v1";
 inline constexpr const char * kCancelMessageType = "uran.operations.cancel.v1";
 
 std::string schema_for_message_type(const std::string & message_type);

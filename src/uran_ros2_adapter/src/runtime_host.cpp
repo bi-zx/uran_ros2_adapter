@@ -194,18 +194,27 @@ struct Ros2RuntimeHost::Impl
           throw std::invalid_argument("ROS envelope target differs from contract target");
         }
       }
-      if (message.correlation_id.empty() || document.at("operation_id") != message.correlation_id) {
-        throw std::invalid_argument("correlation_id must equal contract operation_id");
-      }
-      {
+      const bool observation = message.message_type == kObservationMessageType;
+      if (observation) {
+        // The observation contract identifies its source. The envelope selects the consumer.
+        if (message.correlation_id.empty() ||
+          (message.instance_id.empty() && (message.device_id.empty() || message.component_id.empty()))) {
+          throw std::invalid_argument("observation requires a correlation_id and a delivery target");
+        }
+      } else {
+        if (message.correlation_id.empty() || document.at("operation_id") != message.correlation_id) {
+          throw std::invalid_argument("correlation_id must equal contract operation_id");
+        }
         std::lock_guard<std::mutex> lock(pending_mutex);
         pending_operations[message.correlation_id] =
           uran_interfaces::ComponentTarget::from_json(document.at("target"));
       }
       const auto result = runtime->dispatch(to_api_envelope(message));
       if (!result.ok) {
-        std::lock_guard<std::mutex> lock(pending_mutex);
-        pending_operations.erase(message.correlation_id);
+        if (!observation) {
+          std::lock_guard<std::mutex> lock(pending_mutex);
+          pending_operations.erase(message.correlation_id);
+        }
         throw std::runtime_error(result.message);
       }
     } catch (const std::exception & exception) {

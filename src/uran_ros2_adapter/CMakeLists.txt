@@ -64,6 +64,7 @@ set_property(TARGET uran_runtime_node APPEND PROPERTY BUILD_RPATH "${_uran_nativ
 install(TARGETS ${PROJECT_NAME} EXPORT uran_ros2_adapterTargets
   LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin)
 install(TARGETS uran_runtime_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/map_observations.py DESTINATION lib/${PROJECT_NAME} RENAME map_observations)
 install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(uran_ros2_adapterTargets HAS_LIBRARY_TARGET)
 ament_export_dependencies(
