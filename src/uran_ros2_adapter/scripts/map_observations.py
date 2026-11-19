@@ -26,7 +26,8 @@ class MapObservations(Node):
                     "device_id":"","component_id":"","instance_id":"","source_component":"sensors",
                     "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"",
                     "scan_topic":"scan","depth_topic":"","depth_origin_frame":"","gps_topic":"",
-                    "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,"sensor_adapter":"","slam_adapter":""}
+                    "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,
+                    "surface_topic":"survey_surfaces","surface_max_age_s":2.0,"sensor_adapter":"","slam_adapter":""}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
         if not self.cfg["device_id"] or not self.cfg["component_id"]:
             raise ValueError("provide the target device_id and component_id")
@@ -49,6 +50,7 @@ class MapObservations(Node):
         self.odom_stamp = self.anchor_stamp = self.revision = 0
         self.anchor = None
         self.out = self.create_publisher(ContractEnvelope,"/uran/runtime/dispatch",30)
+        self.surface_out = self.create_publisher(ContractEnvelope,self.cfg["surface_topic"],qos_profile_sensor_data) if self.cfg["surface_topic"] else None
         self.pending = {}
         self.layers = {}
         self.last_warning = {}
@@ -180,7 +182,7 @@ class MapObservations(Node):
         pose = self.anchor @ self.body_in_odom(stamp) @ matrix(mount.transform)
         return pose[:3,:3],pose[:3,3]
 
-    def send(self,kind,stamp,frame,value):
+    def send(self,kind,stamp,frame,value,publisher=None):
         target = self.cfg
         packet = ContractEnvelope()
         packet.message_type = "uran.sensors.observation.v1"
@@ -189,7 +191,7 @@ class MapObservations(Node):
         packet.correlation_id = "{}-{}-{}-{}-{}".format(packet.device_id, target["source_component"], packet.instance_id or packet.component_id, kind, stamp)
         packet.payload_json = json.dumps({"schema_version":"1.0","source":{"device_id":packet.device_id,"component_id":target["source_component"]},
             "frame_id":frame,"timestamp_ns":stamp,"observation_type":kind,"value":value},allow_nan=False,separators=(",",":"))
-        self.out.publish(packet)
+        (self.out if publisher is None else publisher).publish(packet)
 
     def warn(self,key,message):
         now = time.monotonic()
@@ -221,7 +223,7 @@ class MapObservations(Node):
         self.send("laser_scan",stamp.nanoseconds,self.cfg["body_frame"],{"angle_min":-math.pi,"angle_max":math.pi-increment,
             "angle_increment":increment,"range_min":msg.range_min,"range_max":msg.range_max+float(np.linalg.norm(offset)),"ranges":result})
 
-    def depth(self,name,msg,stamp):
+    def depth(self,name,msg,stamp,task_fresh,publish_surface):
         if name in ("depth","depth_image"):
             if name == "depth":
                 local_points = cloud_points(msg)
@@ -252,7 +254,13 @@ class MapObservations(Node):
                 ground = self.anchor[:3,:3] @ ground_odom + self.anchor[:3,3]
             else:
                 _,ground = self.in_map(self.cfg["ground_frame"],stamp)
-            self.layers[name] = (stamp.nanoseconds,ground.tolist(),{"origin":origin.tolist(),"body_xy":body[:2].tolist(),"points":points.tolist()})
+            ground = ground.tolist()
+            group = {"origin":origin.tolist(),"body_xy":body[:2].tolist(),"points":points.tolist()}
+            if publish_surface:
+                self.send("depth_rays",stamp.nanoseconds,self.cfg["map_frame"],
+                          {"map_id":self.cfg["map_id"],"ground_xyz":ground,"beams":[group]},self.surface_out)
+            if task_fresh:
+                self.layers[name] = (stamp.nanoseconds,ground,group)
 
     def flush(self):
         if self.slam:
@@ -287,11 +295,16 @@ class MapObservations(Node):
                 return
         now = self.get_clock().now().nanoseconds
         collect_depth = time.monotonic() >= self.next_depth
+        publish_surface = self.surface_out is not None and self.surface_out.get_subscription_count()>0
+        depth_processed = False
         for name,pending in self.pending.items():
             if name != "scan" and not collect_depth:
                 continue
             for stamp,msg in reversed(pending):
-                if abs(now-stamp.nanoseconds) > 0.3e9:
+                age = (now-stamp.nanoseconds)*1e-9
+                task_fresh = abs(age)<=0.3
+                map_fresh = name!="scan" and publish_surface and 0<=age<=self.cfg["surface_max_age_s"]
+                if not (task_fresh or map_fresh):
                     self.warn(name+"-stamp","{} acquisition stamp is unavailable or stale".format(name))
                     break
                 if name != "scan" and self.cfg["odom_topic"] and stamp.nanoseconds > self.odom_stamp:
@@ -300,7 +313,8 @@ class MapObservations(Node):
                     if name == "scan":
                         self.scan(msg,stamp)
                     else:
-                        self.depth(name,msg,stamp)
+                        self.depth(name,msg,stamp,task_fresh,publish_surface)
+                        depth_processed = True
                 except TransformException as exc:
                     self.warn(name,str(exc))
                     continue
@@ -313,9 +327,9 @@ class MapObservations(Node):
             if latest > self.last_depth:
                 self.send("depth_rays",latest,frame,{"map_id":self.cfg["map_id"],"ground_xyz":ground,"beams":beams})
                 self.last_depth = latest
-                if self.cfg["depth_rate_hz"] > 0:
-                    self.next_depth = time.monotonic() + 1.0/self.cfg["depth_rate_hz"]
             self.layers.clear()
+        if depth_processed and self.cfg["depth_rate_hz"]>0:
+            self.next_depth = time.monotonic()+1.0/self.cfg["depth_rate_hz"]
 
 
 if __name__ == "__main__":

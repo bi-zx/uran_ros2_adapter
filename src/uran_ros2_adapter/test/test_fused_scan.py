@@ -228,3 +228,53 @@ def test_depth_uses_acquisition_time_of_each_ray_and_replacement():
     paired = synchronized_scan_points(raw,pts,exposure-start,25000000)
     hits,src = fuse_ranges(raw,np.eye(4),(0,0),[(2,paired)],action)
     assert src.tolist() == [0,0,0,2,2,0,0] and np.allclose(hits[3:5],.8)
+
+
+def test_surface_returns_extend_planar_map_and_preserve_occlusion_and_walls(tmp_path):
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    path = str(tmp_path/"room.sqlite")
+    survey = SurveyCoverage(path,"room","map")
+    group = {"origin":[0,0,.3],"body_xy":[0,0],"points":[[.125,.025,0],[.225,.025,.12],[.325,.025,0],
+             [.425,.025,-.14],[.525,.025,.9],[5.125,.025,0]]}
+    grid = np.array([[-1,-1,100]],dtype=np.int8)
+    for stamp in (10,20):
+        survey.observe_surfaces([group],[0,0,0],.045,.45,stamp)
+    survey.save()
+    survey = SurveyCoverage(path,"room","map")
+    fused,origin = survey.overlay(grid,np.zeros(2),np.eye(2),.05)
+    assert np.allclose(origin,[0,0])
+    assert fused[0,2] == 100 and fused[0,4] == 100 and fused[0,6] == 0 and fused[0,8] == 100
+    assert fused[0,3] == -1 and fused.shape[1]<11
+    rot = np.array([[0.,-1.],[1.,0.]])
+    out,world = survey.overlay(np.array([[-1]],dtype=np.int8),np.array([.35,0]),rot,.05)
+    cell = np.floor((np.array([.325,.025])-world) @ rot/.05).astype(int)
+    assert out[cell[1],cell[0]] == 0
+
+
+def test_surface_confirmations_need_distinct_times_and_stay_within_body_radius():
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    survey = SurveyCoverage("","room","map")
+    points = [[.175,.025,0],[4.9999,0,0]]
+    beams = [{"origin":[.2,0,.3],"body_xy":[0,0],"points":points}]
+    grid = np.full((1,101),-1,dtype=np.int8)
+    pose = np.array([.012,0])
+    for stamp in (10,10):
+        survey.observe_surfaces(beams,[0,0,0],.045,.45,stamp)
+    out,_ = survey.overlay(grid,pose,np.eye(2),.05)
+    assert not (out==0).any()
+    survey.observe_surfaces(beams,[0,0,0],.045,.45,20)
+    out,origin = survey.overlay(grid,pose,np.eye(2),.05)
+    assert (out==0).sum() == 2
+    centers = origin[0]+(np.where(out==0)[1]+.5)*.05
+    assert max(centers)<5.0
+
+def test_tilted_floor_correction_keeps_a_step_and_a_drop():
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    survey = SurveyCoverage("","room","map")
+    x,y = np.meshgrid(np.arange(.2,1,.04),np.arange(-.3,.31,.04))
+    floor = np.column_stack((x.ravel(),y.ravel(),.042*x.ravel()+.02*y.ravel()))
+    probes = [[1.625,.025,.069],[1.625,.125,.174],[1.625,.225,-.052]]
+    beams = [{"origin":[0,0,.3],"body_xy":[0,0],"points":np.vstack((floor,probes))}]
+    for stamp in (11,22):
+        survey.observe_surfaces(beams,[0,0,0],.045,.45,stamp)
+    assert [survey.surfaces[(32,y)][0] for y in (0,2,4)] == [-2,2,2]
