@@ -11,57 +11,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from geometry_msgs.msg import TransformStamped
+from uran_ros2_adapter.map_geometry import rigid, matrix, odometry_transform, body_in_odom, within_survey, cloud_points, rectified_depth_points
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, NavSatFix
 from tf2_ros import Buffer, TransformException, TransformListener
 from uran_ros2_msgs.msg import ContractEnvelope, OperationEvent
-
-
-def rigid(transform):
-    q, t = transform.rotation, transform.translation
-    x, y, z, w = q.x, q.y, q.z, q.w
-    rotation = np.array([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
-                         [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
-                         [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
-    return rotation, np.array([t.x,t.y,t.z])
-
-
-def cloud_points(msg):
-    fields = {f.name:f for f in msg.fields}
-    coordinates = []
-    stride = max(1, math.ceil(math.sqrt(msg.width*msg.height/2400))) if msg.height > 1 else 1
-    for name in ("x","y","z"):
-        f = fields[name]
-        dtype = (">" if msg.is_bigendian else "<") + {7:"f4",8:"f8"}[f.datatype]
-        values = np.ndarray((msg.height,msg.width),dtype,msg.data,offset=f.offset,strides=(msg.row_step,msg.point_step))
-        coordinates.append(values[::stride,::stride].ravel())
-    points = np.column_stack(coordinates)
-    return points[np.isfinite(points).all(axis=1)]
-
-
-def rectified_depth_points(image, info):
-    """Return XYZ in the optical frame for standard metric ROS depth images."""
-    if image.header.frame_id != info.header.frame_id:
-        raise ValueError("depth image and calibration frames differ")
-    bin_x,bin_y = max(1,info.binning_x),max(1,info.binning_y)
-    fx,fy = info.p[0]/bin_x,info.p[5]/bin_y
-    if fx <= 0 or fy <= 0:
-        raise ValueError("rectified depth camera has no projection calibration")
-    cx,cy = (info.p[2]-info.roi.x_offset)/bin_x,(info.p[6]-info.roi.y_offset)/bin_y
-    if image.encoding == "16UC1":
-        fmt,scale = "u2",0.001
-    elif image.encoding == "32FC1":
-        fmt,scale = "f4",1.0
-    else:
-        raise ValueError("unsupported depth encoding " + image.encoding)
-    dtype = np.dtype((">" if image.is_bigendian else "<") + fmt)
-    raw = np.ndarray((image.height,image.width),dtype,image.data,strides=(image.step,dtype.itemsize))
-    stride = max(1, math.ceil(math.sqrt(image.width*image.height/2400)))
-    sampled = raw[::stride,::stride]
-    v,u = np.nonzero(np.isfinite(sampled) & (sampled > 0))
-    z = sampled[v,u].astype(float)*scale
-    return np.column_stack(((u*stride-cx)*z/fx,(v*stride-cy)*z/fy,z))
 
 
 class MapObservations(Node):
@@ -161,27 +115,12 @@ class MapObservations(Node):
             self.anchor,self.anchor_stamp,self.odom_stamp = None,0,0
         if stamp <= self.odom_stamp:
             return
-        t = TransformStamped()
-        t.header,t.child_frame_id = msg.header,msg.child_frame_id
-        p = msg.pose.pose
-        t.transform.translation.x,t.transform.translation.y,t.transform.translation.z = p.position.x,p.position.y,p.position.z
-        t.transform.rotation = p.orientation
+        t = odometry_transform(msg)
         self.odom_history.set_transform(t,"odometry")
         self.odom_frames,self.odom_stamp = frames,stamp
 
-    @staticmethod
-    def matrix(transform):
-        result = np.eye(4)
-        result[:3,:3],result[:3,3] = rigid(transform)
-        return result
-
     def body_in_odom(self,stamp):
-        odom,child = self.odom_frames
-        raw = self.matrix(self.odom_history.lookup_transform(odom,child,stamp).transform)
-        if child == self.cfg["odom_body_alias"]:
-            return raw
-        mount = self.tf.lookup_transform(child,self.cfg["body_frame"],stamp)
-        return raw @ self.matrix(mount.transform)
+        return body_in_odom(self.odom_history,self.tf,self.odom_frames,self.cfg["body_frame"],self.cfg["odom_body_alias"],stamp)
 
     def odometry_corrected_pose(self):
         if not self.odom_stamp:
@@ -194,7 +133,7 @@ class MapObservations(Node):
             correction = None
         if correction is not None and Time.from_msg(correction.header.stamp).nanoseconds:
             stamp = Time.from_msg(correction.header.stamp)
-            candidate = self.matrix(correction.transform)
+            candidate = matrix(correction.transform)
         else:
             correction = self.tf.lookup_transform(frame,self.cfg["body_frame"],Time())
             stamp = Time.from_msg(correction.header.stamp)
@@ -202,7 +141,7 @@ class MapObservations(Node):
         if stamp.nanoseconds > self.anchor_stamp:
             if candidate is None:
                 try:
-                    candidate = self.matrix(correction.transform) @ np.linalg.inv(self.body_in_odom(stamp))
+                    candidate = matrix(correction.transform) @ np.linalg.inv(self.body_in_odom(stamp))
                 except TransformException:
                     # The next odometry sample may still bracket this laser time.
                     pass
@@ -225,7 +164,7 @@ class MapObservations(Node):
             return rigid(self.tf.lookup_transform(self.cfg["map_frame"],source,stamp).transform)
         assert self.anchor is not None
         mount = self.tf.lookup_transform(self.cfg["body_frame"],source,stamp)
-        pose = self.anchor @ self.body_in_odom(stamp) @ self.matrix(mount.transform)
+        pose = self.anchor @ self.body_in_odom(stamp) @ matrix(mount.transform)
         return pose[:3,:3],pose[:3,3]
 
     def send(self,kind,stamp,frame,value):
@@ -290,6 +229,8 @@ class MapObservations(Node):
             rot,offset = self.in_map(source_frame,stamp)
             origin = origin @ rot.T + offset
             points = points @ rot.T + offset
+        _,body = self.in_map(self.cfg["body_frame"],stamp)
+        points = points[within_survey(points,body[:2])]
         if len(points):
             if self.odom_frames and self.cfg["ground_frame"] == self.odom_frames[0]:
                 # With a level floor at odometry Z=0, project this body position onto that plane.
@@ -298,7 +239,7 @@ class MapObservations(Node):
                 ground = self.anchor[:3,:3] @ ground_odom + self.anchor[:3,3]
             else:
                 _,ground = self.in_map(self.cfg["ground_frame"],stamp)
-            self.layers[name] = (stamp.nanoseconds,ground.tolist(),{"origin":origin.tolist(),"points":points.tolist()})
+            self.layers[name] = (stamp.nanoseconds,ground.tolist(),{"origin":origin.tolist(),"body_xy":body[:2].tolist(),"points":points.tolist()})
 
     def flush(self):
         if self.slam:

@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(uran_ros2_adapter VERSION 2.1.0 LANGUAGES CXX)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
 find_package(nlohmann_json 3.10 REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -65,6 +66,9 @@ install(TARGETS ${PROJECT_NAME} EXPORT uran_ros2_adapterTargets
   LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin)
 install(TARGETS uran_runtime_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/map_observations.py DESTINATION lib/${PROJECT_NAME} RENAME map_observations)
+install(PROGRAMS scripts/fused_scan.py DESTINATION lib/${PROJECT_NAME} RENAME fused_scan)
+install(PROGRAMS scripts/survey_map.py DESTINATION lib/${PROJECT_NAME} RENAME survey_map)
+ament_python_install_package(${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(uran_ros2_adapterTargets HAS_LIBRARY_TARGET)
 ament_export_dependencies(
@@ -74,6 +78,8 @@ ament_export_dependencies(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_fused_scan test/test_fused_scan.py)
   ament_add_gtest(test_conversions test/test_conversions.cpp)
   target_link_libraries(test_conversions ${PROJECT_NAME})
   set_property(TARGET test_conversions APPEND PROPERTY BUILD_RPATH "${_uran_native_rpath}")

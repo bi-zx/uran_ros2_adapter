@@ -59,3 +59,11 @@ Set `depth_rate_hz` to the rate the onboard terrain consumer can process.
 The bridge uses the latest synchronized depth for each publication. Zero uses
 the input rate. The CyberDog2 board was tested at 2 Hz for depth while its
 laser and pose streams ran independently.
+
+### Bounded mapping
+
+Run `ros2 run uran_ros2_adapter fused_scan` before starting SLAM. The node accepts an odometry topic, calibrated rectified depth or an XYZ cloud, and optionally a ToF adapter. It publishes `scan_fused` in the original laser frame. Finite laser hits take priority. Depth and ToF can fill a missing beam with two nearby measured returns in a 5 cm slice centered on the scan plane. The body pose at each acquisition compensates sensor motion. The window defaults to 60 ms and the ground clearance for supplemental points to 8 cm. Set the floor frame to the local ground reference. Topics and mount frames are device parameters.
+
+The horizontal observation radius is 5 m about the body at acquisition. A distant hit supplies no map update. The per-beam `scan_fused/sources` mono8 image has the scan timestamp and encodes unknown (0), lidar (1), depth (2) and ToF (3). Standard output uses NaN for unknown. Set `unknown_range:=zero` for a scanner consumer that expects zero below its minimum range. Feed this buffered stream to both mapping and localization. A low-latency motion controller can continue consuming the physical scan.
+
+Use `ros2 run uran_ros2_adapter survey_map` to publish the occupancy grid used by RViz and map export. Set `map_id`, `map_frame`, `grid_topic` (the SLAM raster), `scan_topic` (the fused scan), and `coverage_file` (a writable SQLite path per map). By default the node uses the timestamped map-to-body TF. Set `pose_topic` to use a stamped body pose in the same map frame. The output `survey_map` retains the SLAM occupancy values for cells supported by measured rays from at least one in-range viewpoint. Unobserved cells carry -1. Reopening the same map and coverage file retains the survey as the robot moves. Save the published layer with the standard ROS map saver. For patrol use the saved survey and load the vendor pose graph for localization.
