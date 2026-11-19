@@ -43,3 +43,19 @@ scans and depth rays from standard ROS topics. Its ROS parameters select frames,
 topics and the destination. An external SLAM system supplies a map ID and TF.
 Products that manage SLAM sessions or use vendor measurements can supply a
 `slam_adapter` or `sensor_adapter` Python factory as `module:callable`.
+
+A rectified depth camera can supply `depth_image_topic` and
+`depth_camera_info_topic`. The bridge projects `16UC1` millimetre or `32FC1`
+metre depth images into the calibrated optical frame. The image and camera
+info must use the same optical frame.
+
+Use `odom_body_alias` when the odometry producer gives the physical body a
+different child frame name. Use a calibrated TF for offset odometry sensors.
+For a level floor coinciding with odometry Z=0, setting `ground_frame` to the
+odometry parent projects the robot position onto that plane. Use a measured
+local ground frame on terrain with changing elevation.
+
+Set `depth_rate_hz` to the rate the onboard terrain consumer can process.
+The bridge uses the latest synchronized depth for each publication. Zero uses
+the input rate. The CyberDog2 board was tested at 2 Hz for depth while its
+laser and pose streams ran independently.

@@ -13,7 +13,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan, PointCloud2, NavSatFix
+from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, NavSatFix
 from tf2_ros import Buffer, TransformException, TransformListener
 from uran_ros2_msgs.msg import ContractEnvelope, OperationEvent
 
@@ -40,14 +40,38 @@ def cloud_points(msg):
     return points[np.isfinite(points).all(axis=1)]
 
 
+def rectified_depth_points(image, info):
+    """Return XYZ in the optical frame for standard metric ROS depth images."""
+    if image.header.frame_id != info.header.frame_id:
+        raise ValueError("depth image and calibration frames differ")
+    bin_x,bin_y = max(1,info.binning_x),max(1,info.binning_y)
+    fx,fy = info.p[0]/bin_x,info.p[5]/bin_y
+    if fx <= 0 or fy <= 0:
+        raise ValueError("rectified depth camera has no projection calibration")
+    cx,cy = (info.p[2]-info.roi.x_offset)/bin_x,(info.p[6]-info.roi.y_offset)/bin_y
+    if image.encoding == "16UC1":
+        fmt,scale = "u2",0.001
+    elif image.encoding == "32FC1":
+        fmt,scale = "f4",1.0
+    else:
+        raise ValueError("unsupported depth encoding " + image.encoding)
+    dtype = np.dtype((">" if image.is_bigendian else "<") + fmt)
+    raw = np.ndarray((image.height,image.width),dtype,image.data,strides=(image.step,dtype.itemsize))
+    stride = max(1, math.ceil(math.sqrt(image.width*image.height/2400)))
+    sampled = raw[::stride,::stride]
+    v,u = np.nonzero(np.isfinite(sampled) & (sampled > 0))
+    z = sampled[v,u].astype(float)*scale
+    return np.column_stack(((u*stride-cx)*z/fx,(v*stride-cy)*z/fy,z))
+
+
 class MapObservations(Node):
     def __init__(self):
         super().__init__("map_observations")
         defaults = {"map_id":"","map_frame":"map","body_frame":"base_link","ground_frame":"base_footprint",
                     "device_id":"","component_id":"","instance_id":"","source_component":"sensors",
-                    "reference_mode":"local","odom_topic":"odom","slam_timeout_s":2.0,
+                    "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0,
                     "scan_topic":"scan","depth_topic":"","depth_origin_frame":"","gps_topic":"",
-                    "sensor_adapter":"","slam_adapter":""}
+                    "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,"sensor_adapter":"","slam_adapter":""}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
         if not self.cfg["device_id"] or not self.cfg["component_id"]:
             raise ValueError("provide the target device_id and component_id")
@@ -55,8 +79,10 @@ class MapObservations(Node):
             raise ValueError("provide a SLAM session adapter or an externally managed map_id")
         if self.cfg["reference_mode"] not in ("local", "geographic"):
             raise ValueError("reference_mode must be local or geographic")
-        if not (self.cfg["sensor_adapter"] or self.cfg["depth_topic"]):
-            raise ValueError("provide a depth_topic or a sensor adapter")
+        if bool(self.cfg["depth_image_topic"]) != bool(self.cfg["depth_camera_info_topic"]):
+            raise ValueError("rectified depth requires both image and camera info topics")
+        if not any(self.cfg[k] for k in ("sensor_adapter","depth_topic","depth_image_topic")):
+            raise ValueError("provide a depth cloud, rectified depth image or a sensor adapter")
         self.tf = Buffer()
         self.listener = TransformListener(self.tf,self)
         self.odom_history = Buffer()
@@ -68,6 +94,7 @@ class MapObservations(Node):
         self.layers = {}
         self.last_warning = {}
         self.last_pose = self.last_depth = 0
+        self.next_depth = 0.0
         self.slam = None
         if self.cfg["slam_adapter"]:
             module,factory = self.cfg["slam_adapter"].split(":")
@@ -80,6 +107,10 @@ class MapObservations(Node):
         self.create_subscription(LaserScan,self.cfg["scan_topic"],lambda m:self.queue("scan",m,m.header.stamp),qos_profile_sensor_data)
         if self.cfg["depth_topic"]:
             self.create_subscription(PointCloud2,self.cfg["depth_topic"],lambda m:self.queue("depth",m,m.header.stamp),qos_profile_sensor_data)
+        if self.cfg["depth_image_topic"]:
+            self.camera_info = None
+            self.create_subscription(CameraInfo,self.cfg["depth_camera_info_topic"],self.on_camera_info,qos_profile_sensor_data)
+            self.create_subscription(Image,self.cfg["depth_image_topic"],lambda m:self.queue("depth_image",m,m.header.stamp),qos_profile_sensor_data)
         if self.cfg["sensor_adapter"]:
             module,factory = self.cfg["sensor_adapter"].split(":")
             getattr(import_module(module),factory)(self)
@@ -108,6 +139,9 @@ class MapObservations(Node):
         if self.slam and self.slam.stage != "ready":
             return
         self.pending.setdefault(name,deque(maxlen=8)).append((Time.from_msg(stamp),msg))
+
+    def on_camera_info(self,msg):
+        self.camera_info = msg
 
     def on_gps(self,msg):
         if msg.status.status >= 0 and math.isfinite(msg.latitude) and math.isfinite(msg.longitude):
@@ -144,6 +178,8 @@ class MapObservations(Node):
     def body_in_odom(self,stamp):
         odom,child = self.odom_frames
         raw = self.matrix(self.odom_history.lookup_transform(odom,child,stamp).transform)
+        if child == self.cfg["odom_body_alias"]:
+            return raw
         mount = self.tf.lookup_transform(child,self.cfg["body_frame"],stamp)
         return raw @ self.matrix(mount.transform)
 
@@ -222,7 +258,7 @@ class MapObservations(Node):
                 # Only the direction is observable for an unbounded ray.
                 x,y = vector[:2]
                 distance = "inf"
-            elif msg.range_min <= r <= msg.range_max and r > 0:
+            elif math.isfinite(r) and msg.range_min <= r <= msg.range_max and r > 0:
                 x,y = (r*vector + offset)[:2]
                 distance = math.hypot(x,y)
             else:
@@ -234,18 +270,34 @@ class MapObservations(Node):
             "angle_increment":increment,"range_min":msg.range_min,"range_max":msg.range_max+float(np.linalg.norm(offset)),"ranges":result})
 
     def depth(self,name,msg,stamp):
-        if name == "depth":
+        if name in ("depth","depth_image"):
+            if name == "depth":
+                local_points = cloud_points(msg)
+            else:
+                if self.camera_info is None:
+                    return
+                try:
+                    local_points = rectified_depth_points(msg,self.camera_info)
+                except ValueError as exc:
+                    self.warn(name,str(exc))
+                    return
             rot,offset = self.in_map(msg.header.frame_id,stamp)
             origin_frame = self.cfg["depth_origin_frame"] or msg.header.frame_id
             _,origin = self.in_map(origin_frame,stamp)
-            points = cloud_points(msg) @ rot.T + offset
+            points = local_points @ rot.T + offset
         else:
             source_frame,origin,points = msg
             rot,offset = self.in_map(source_frame,stamp)
             origin = origin @ rot.T + offset
             points = points @ rot.T + offset
         if len(points):
-            _,ground = self.in_map(self.cfg["ground_frame"],stamp)
+            if self.odom_frames and self.cfg["ground_frame"] == self.odom_frames[0]:
+                # With a level floor at odometry Z=0, project this body position onto that plane.
+                ground_odom = self.body_in_odom(stamp)[:3,3].copy()
+                ground_odom[2] = 0.0
+                ground = self.anchor[:3,:3] @ ground_odom + self.anchor[:3,3]
+            else:
+                _,ground = self.in_map(self.cfg["ground_frame"],stamp)
             self.layers[name] = (stamp.nanoseconds,ground.tolist(),{"origin":origin.tolist(),"points":points.tolist()})
 
     def flush(self):
@@ -278,11 +330,16 @@ class MapObservations(Node):
             if self.cfg["odom_topic"]:
                 return
         now = self.get_clock().now().nanoseconds
+        collect_depth = time.monotonic() >= self.next_depth
         for name,pending in self.pending.items():
+            if name != "scan" and not collect_depth:
+                continue
             for stamp,msg in reversed(pending):
                 if abs(now-stamp.nanoseconds) > 0.3e9:
                     self.warn(name+"-stamp","{} acquisition stamp is unavailable or stale".format(name))
                     break
+                if name != "scan" and self.cfg["odom_topic"] and stamp.nanoseconds > self.odom_stamp:
+                    continue
                 try:
                     if name == "scan":
                         self.scan(msg,stamp)
@@ -300,6 +357,8 @@ class MapObservations(Node):
             if latest > self.last_depth:
                 self.send("depth_rays",latest,frame,{"map_id":self.cfg["map_id"],"ground_xyz":ground,"beams":beams})
                 self.last_depth = latest
+                if self.cfg["depth_rate_hz"] > 0:
+                    self.next_depth = time.monotonic() + 1.0/self.cfg["depth_rate_hz"]
             self.layers.clear()
 
 
