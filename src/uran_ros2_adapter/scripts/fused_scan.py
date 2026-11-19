@@ -13,7 +13,9 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from uran_ros2_adapter.map_geometry import body_in_odom, cloud_points, fuse_ranges, matrix, odometry_transform, rectified_depth_points, within_survey
+from uran_ros2_adapter.map_geometry import (body_in_odom, cloud_points, fuse_ranges, matching_depth_views, matrix,
+                                           near_lidar_actions, odometry_transform, rectified_depth_model,
+                                           rectified_depth_points, rectified_intrinsics, within_survey)
 
 
 class FusedScan(Node):
@@ -22,7 +24,7 @@ class FusedScan(Node):
         defaults = {"scan_topic":"scan", "output_topic":"scan_fused", "body_frame":"base_link", "odom_topic":"odom",
                     "odom_body_alias":"", "ground_frame":"base_footprint", "depth_image_topic":"",
                     "depth_camera_info_topic":"", "depth_topic":"", "sensor_adapter":"", "pair_tolerance_s":0.060,
-                    "unknown_range":"nan", "max_wait_s":0.45, "min_ground_height_m":0.08, "depth_pixel_stride":2}
+                    "depth_check_range_m":0.0, "depth_disagreement_m":0.25, "unknown_range":"nan", "max_wait_s":0.45, "min_ground_height_m":0.08, "depth_pixel_stride":2}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
         if self.cfg["unknown_range"] not in ("nan","zero"):
             raise ValueError("unknown_range must be nan or zero")
@@ -30,6 +32,10 @@ class FusedScan(Node):
             raise ValueError("rectified depth requires both image and calibration topics")
         if self.resolve_topic_name(self.cfg["scan_topic"]) == self.resolve_topic_name(self.cfg["output_topic"]):
             raise ValueError("provide distinct input and output scan topics")
+        if self.cfg["depth_check_range_m"] < 0 or self.cfg["depth_disagreement_m"] <= 0:
+            raise ValueError("provide a nonnegative cross-check range and a positive depth difference")
+        if self.cfg["depth_check_range_m"] and not self.cfg["depth_image_topic"]:
+            raise ValueError("the lidar cross-check requires a calibrated depth image")
         self.tf,self.odom = Buffer(),Buffer()
         self.listener = TransformListener(self.tf,self)
         self.frames,self.info = None,None
@@ -38,6 +44,9 @@ class FusedScan(Node):
         self.last_warning = {}
         self.pub = self.create_publisher(LaserScan,self.cfg["output_topic"],5)
         self.sources = self.create_publisher(Image,self.cfg["output_topic"]+"/sources",5)
+        self.check = None
+        if self.cfg["depth_check_range_m"]:
+            self.check = self.create_publisher(Image,self.cfg["output_topic"]+"/lidar_check",5)
         self.create_subscription(Odometry,self.cfg["odom_topic"],self.on_odom,qos_profile_sensor_data)
         self.create_subscription(LaserScan,self.cfg["scan_topic"],self.on_scan,qos_profile_sensor_data)
         if self.cfg["depth_topic"]:
@@ -99,6 +108,23 @@ class FusedScan(Node):
         laser = (world[use]-laser_in_odom[:3,3]) @ laser_in_odom[:3,:3]
         return (2 if name in ("image","cloud") else 3),laser
 
+    def lidar_check(self,scan,laser,pose,stamp,middle,tolerance_ns,supplements):
+        frames = [(t.nanoseconds,(t,msg)) for t,msg in self.layers.get("image",())]
+        views = []
+        info = self.info
+        mount = self.mount(info.header.frame_id,stamp)
+        footprint = ((info.height,info.width),rectified_intrinsics(info),pose @ mount)
+        for ns,(t,msg) in matching_depth_views(frames,middle,tolerance_ns):
+            try:
+                pose = self.pose(t)
+                camera = pose @ self.mount(msg.header.frame_id,t)
+                views.append((ns,(rectified_depth_model(msg,self.info),camera,pose[:2,3])))
+            except (TransformException,ValueError) as exc:
+                self.warn("lidar_check",exc)
+        tof_layers = [points for kind,points in supplements if kind==3]
+        return near_lidar_actions(scan,laser,middle,views,tof_layers,self.cfg["depth_check_range_m"],
+                                  self.cfg["depth_disagreement_m"],tolerance_ns,footprint)
+
     def flush(self):
         if not self.frames or not self.pending:
             return
@@ -132,7 +158,16 @@ class FusedScan(Node):
                     supplements.append(layer)
             except (TransformException,ValueError) as exc:
                 self.warn(name,exc)
-        hits,source = fuse_ranges(scan,laser,pose[:2,3],supplements)
+        action = None
+        if self.check is not None:
+            if self.info is None:
+                return
+            try:
+                action = self.lidar_check(scan,laser,pose,stamp,middle,tolerance*1e9-duration_ns/2,supplements)
+            except (TransformException,ValueError) as exc:
+                self.warn("lidar_check",exc)
+                return
+        hits,source = fuse_ranges(scan,laser,pose[:2,3],supplements,action)
         if self.cfg["unknown_range"] == "zero":
             hits[source==0] = 0.0
         scan.ranges = hits.astype(np.float32).tolist()
@@ -143,6 +178,9 @@ class FusedScan(Node):
         mask.header,mask.encoding,mask.height,mask.width = scan.header,"mono8",1,len(source)
         mask.step,mask.data = len(source),source.tobytes()
         self.sources.publish(mask)
+        if self.check is not None:
+            mask.data = action.tobytes()
+            self.check.publish(mask)
 
 
 if __name__ == "__main__":

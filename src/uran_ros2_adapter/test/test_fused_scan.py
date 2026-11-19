@@ -75,3 +75,45 @@ def test_reobserving_from_opposite_edge_keeps_both_views(tmp_path):
     coverage.save()
     reopened = SurveyCoverage(path,"route","map")
     assert reopened.permits(np.array([[.001,.025],[.023,.025]])).all()
+
+
+def test_close_lidar_conflict_uses_measured_plane_hit_only_after_two_depth_views():
+    from uran_ros2_adapter.map_geometry import near_lidar_actions
+    # Optical X points right, optical Y down and Z forward in the laser frame.
+    optical = np.eye(4)
+    optical[:3,:3] = [[0,0,1],[-1,0,0],[0,-1,0]]
+    raw = scan([0,0,0,.48,0,0,0])
+    depth = np.full((65,65),1000,dtype=np.uint16)
+    view = ((depth,.001,80,80,32,32),optical,(0,0))
+    current = 1000000000
+    views = [(current,view),(current-70000000,view)]
+    action = near_lidar_actions(raw,np.eye(4),current,views,[],1.0,.25,60000000)
+    ranges,source = fuse_ranges(raw,np.eye(4),(0,0),[(2,np.array(returns(3,[1,1.01])))],action)
+    assert action[3] == 2 and source[3] == 2 and np.isclose(ranges[3],1.0)
+    held = near_lidar_actions(raw,np.eye(4),current,views[:1],[],1.0,.25,60000000)
+    ranges,source = fuse_ranges(raw,np.eye(4),(0,0),[(2,np.array(returns(3,[1,1.01])))],held)
+    assert held[3] == 1 and source[3] == 0 and np.isnan(ranges[3])
+    assert near_lidar_actions(raw,np.eye(4),current,[(current,view),(current,view)],[],1.0,.25,60000000)[3] == 1
+    tof = np.array([[.48,.01,-.01]])
+    assert near_lidar_actions(raw,np.eye(4),current,views,[tof],1.0,.25,60000000)[3] == 0
+    assert near_lidar_actions(raw,np.eye(4),current+1000000000,views,[],1.0,.25,60000000)[3] == 0
+    # A thin nearer object in the projected patch vetoes background depth.
+    depth[32,33] = 475
+    assert near_lidar_actions(raw,np.eye(4),current,views,[],1.0,.25,60000000)[3] == 0
+    depth[:]=0
+    assert near_lidar_actions(raw,np.eye(4),current,views,[],1.0,.25,60000000)[3] == 0
+    depth[:]=6500
+    assert near_lidar_actions(raw,np.eye(4),current,views,[],1.0,.25,60000000)[3] == 0
+
+
+def test_missing_synchronized_depth_cannot_reinsert_a_near_camera_sector_hit():
+    from uran_ros2_adapter.map_geometry import near_lidar_actions
+    optical = np.eye(4)
+    optical[:3,:3] = [[0,0,1],[-1,0,0],[0,-1,0]]
+    footprint = ((65,65),(80,80,32,32),optical)
+    raw = scan([.48,.48,0,.48,0,.48,.48])
+    raw.angle_min,raw.angle_increment = -.9,.3
+    action = near_lidar_actions(raw,np.eye(4),1000000000,[],[],1.,.1,60000000,footprint)
+    assert action.tolist() == [0,0,0,1,0,0,0]
+    tof = [np.array([[.48,0,.01]])]
+    assert near_lidar_actions(raw,np.eye(4),1000000000,[],tof,1.,.1,60000000,footprint)[3] == 0
