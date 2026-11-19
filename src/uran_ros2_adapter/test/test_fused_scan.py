@@ -14,6 +14,16 @@ def returns(i, distances, height=0.0):
     return [(r*math.cos(angle),r*math.sin(angle),height) for r in distances]
 
 
+def test_body_scan_preserves_nearest_hit_unbounded_and_unmeasured_bins():
+    from uran_ros2_adapter.map_geometry import scan_in_body
+    raw = scan([math.inf,2,math.nan,math.inf,1,0,.01])
+    raw.angle_min,raw.angle_increment = -math.pi,math.pi/4
+    # Both finite endpoints fall in the forward bin after applying the scanner offset.
+    result = scan_in_body(raw,np.eye(3),np.array([12.,0.,0.]))["ranges"]
+    assert math.isclose(result[4],math.hypot(12-math.sqrt(2),math.sqrt(2)))
+    assert result[:4]+result[5:] == ["inf",None,None,"inf",None,None,None]
+
+
 def test_fuse_only_supported_hits_preserving_laser():
     raw = scan([1.2,0,math.nan,math.inf,0,0,0])
     depth = returns(0,[0.4,0.41]) + returns(1,[2,2.01]) + returns(2,[1.5]) + returns(3,[4.0,3.0])

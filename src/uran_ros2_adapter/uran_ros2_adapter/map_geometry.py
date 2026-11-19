@@ -35,23 +35,20 @@ def scan_in_body(msg, rot, offset):
     angles = msg.angle_min + np.arange(len(ranges))*msg.angle_increment
     count = round(2*math.pi/abs(msg.angle_increment))
     increment = 2*math.pi/count
-    result = [None]*count
-    unit = np.column_stack((np.cos(angles),np.sin(angles),np.zeros(len(angles)))) @ rot.T
-    for vector,r in zip(unit,ranges):
-        if np.isposinf(r):
-            # Only the direction is observable for an unbounded ray.
-            x,y = vector[:2]
-            distance = "inf"
-        elif math.isfinite(r) and msg.range_min <= r <= msg.range_max and r > 0:
-            x,y = (r*vector + offset)[:2]
-            distance = math.hypot(x,y)
-        else:
-            continue
-        i = round((math.atan2(y,x)+math.pi)/increment) % count
-        if not isinstance(result[i],float) or (distance != "inf" and distance < result[i]):
-            result[i] = distance
+    hits = np.isfinite(ranges) & (ranges > 0) & (ranges >= msg.range_min) & (ranges <= msg.range_max)
+    valid = hits | np.isposinf(ranges)
+    angles,distances,hits = angles[valid],ranges[valid],hits[valid]
+    xy = np.column_stack((np.cos(angles),np.sin(angles))) @ rot[:2,:2].T
+    xy[hits] = xy[hits]*distances[hits,None] + offset[:2]
+    bins = np.rint((np.arctan2(xy[:,1],xy[:,0])+math.pi)/increment).astype(int) % count
+    nearest = np.full(count,np.inf)
+    np.minimum.at(nearest,bins[hits],np.hypot(xy[hits,0],xy[hits,1]))
+    result = np.full(count,None,dtype=object)
+    result[bins[~hits]] = "inf"
+    observed = np.isfinite(nearest)
+    result[observed] = nearest[observed]
     return {"angle_min":-math.pi,"angle_max":math.pi-increment,"angle_increment":increment,
-            "range_min":msg.range_min,"range_max":msg.range_max+float(np.linalg.norm(offset)),"ranges":result}
+            "range_min":msg.range_min,"range_max":msg.range_max+float(np.linalg.norm(offset)),"ranges":result.tolist()}
 
 
 def cloud_points(msg, stride=None):

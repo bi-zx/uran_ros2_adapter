@@ -82,6 +82,7 @@ ament_export_dependencies(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_map_pose test/test_map_pose.py)
   ament_add_pytest_test(test_fused_scan test/test_fused_scan.py)
   ament_add_gtest(test_conversions test/test_conversions.cpp)
   target_link_libraries(test_conversions ${PROJECT_NAME})

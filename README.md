@@ -41,7 +41,7 @@ The destination must register the observation message type.
 `ros2 run uran_ros2_adapter map_observations` publishes mapped poses, base-frame
 scans and depth rays from standard ROS topics. Its ROS parameters select frames,
 topics and the destination. An external SLAM system supplies a map ID and TF.
-For a SLAM system that publishes a stamped body pose, set `pose_topic` to pair it with local odometry.
+For a SLAM system that publishes a stamped body pose, set `pose_topic` to pair it with local odometry. When the upstream estimator already integrates odometry, set `pose_includes_odometry:=true` to forward each estimate at its acquisition stamp. Surface projection aligns the two pose histories at their latest shared time.
 Products that manage SLAM sessions or use vendor measurements can supply a
 `slam_adapter` or `sensor_adapter` Python factory as `module:callable`.
 
@@ -63,11 +63,11 @@ laser and pose streams ran independently.
 
 ### Bounded mapping
 
-On devices where both mapping nodes use the same rectified depth camera, `ros2 run uran_ros2_adapter survey_sensors` runs `fused_scan` and `map_observations` together. The nodes share one subscription per resolved depth image and camera-info topic. Configure each node by name with standard ROS parameters and remaps. Give `map_observations` the fused scan as its mapping input. The standalone executables use the same sensor-processing code.
+On devices where both mapping nodes use the same rectified depth camera, `ros2 run uran_ros2_adapter survey_sensors` runs `fused_scan` and `map_observations` together. The nodes share one subscription per resolved depth image and camera-info topic. Configure each node by name with standard ROS parameters and remaps. Set the task observation node’s `scan_topic` to the low-latency physical scan for motion control. The standalone executables use the same sensor-processing code.
 
 Run `ros2 run uran_ros2_adapter fused_scan` before starting SLAM. The node accepts an odometry topic, calibrated rectified depth or an XYZ cloud, and optionally a ToF adapter. It publishes `scan_fused` in the original laser frame. Finite laser hits normally take priority. Depth and ToF can fill a missing beam with two nearby measured returns in a 5 cm slice centered on the scan plane. The body pose at each acquisition compensates sensor motion. The window defaults to 60 ms and the ground clearance for supplemental points to 8 cm. Set the floor frame to the local ground reference. Topics and mount frames are device parameters.
 
-The horizontal observation radius is 5 m about the body at acquisition. A distant hit supplies no map update. The per-beam `scan_fused/sources` mono8 image has the scan timestamp and encodes unknown (0), lidar (1), depth (2) and ToF (3). Standard output uses NaN for unknown. Set `unknown_range:=zero` for a scanner consumer that expects zero below its minimum range. Feed this buffered stream to both mapping and localization. A low-latency motion controller can continue consuming the physical scan.
+The horizontal observation radius is 5 m about the body at acquisition. A distant hit supplies no map update. The per-beam `scan_fused/sources` mono8 image has the scan timestamp and encodes unknown (0), lidar (1), depth (2) and ToF (3). Standard output uses NaN for unknown. Set `unknown_range:=zero` for a scanner consumer that expects zero below its minimum range. Feed this buffered stream to `survey_map` for observed coverage. A laser-driven pose estimator and low-latency motion controller can subscribe directly to the physical scan.
 
 A device with false close returns can opt into `depth_check_range_m` (metres from the scanner, default 0). Within the calibrated camera overlap, the mapping scan holds unverified near hits as unknown. Two distinct depth exposures must both see beyond the projected lidar point by `depth_disagreement_m` before a measured scan-plane substitute is used. At least 69 of 81 pixels in each patch must provide in-range depth. A foreground pixel or a matching scan-plane ToF point preserves the nearer return. The current exposure must meet the scan pairing tolerance. `scan_fused/lidar_check` is a per-beam mono8 diagnostic. Values are 0 for usual processing, 1 for pending or unknown, and 2 for repeated disagreement. A beam with repeated disagreement can still have source 0 if no replacement was measured. The camera overlap and all projection distances use calibrated extrinsics and acquisition-time odometry.
 

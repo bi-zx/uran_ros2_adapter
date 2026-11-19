@@ -25,7 +25,7 @@ class MapObservations(Node):
         super().__init__("map_observations")
         defaults = {"map_id":"","map_frame":"map","body_frame":"base_link","ground_frame":"base_footprint",
                     "device_id":"","component_id":"","instance_id":"","source_component":"sensors",
-                    "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"",
+                    "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"", "pose_includes_odometry":False,
                     "scan_topic":"scan","depth_topic":"","depth_origin_frame":"","gps_topic":"",
                     "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,
                     "terrain_max_age_s":0.30,"surface_topic":"survey_surfaces","surface_max_age_s":2.0,"sensor_adapter":"","slam_adapter":""}
@@ -40,6 +40,8 @@ class MapObservations(Node):
             raise ValueError("rectified depth requires both image and camera info topics")
         if not any(self.cfg[k] for k in ("sensor_adapter","depth_topic","depth_image_topic")):
             raise ValueError("provide a depth cloud, rectified depth image or a sensor adapter")
+        if self.cfg["pose_includes_odometry"] and not self.cfg["pose_topic"]:
+            raise ValueError("pose_includes_odometry requires a stamped map pose topic")
         self.tf = Buffer()
         self.listener = TransformListener(self.tf,self)
         self.map_poses = self.tf
@@ -64,7 +66,7 @@ class MapObservations(Node):
             self.create_subscription(OperationEvent,"/uran/runtime/events",self.on_event,30)
         if self.cfg["odom_topic"]:
             self.create_subscription(Odometry,self.cfg["odom_topic"],self.on_odom,qos_profile_sensor_data)
-        elif self.cfg["reference_mode"] == "local" and not self.slam:
+        elif self.cfg["reference_mode"] == "local" and not (self.slam or self.cfg["pose_includes_odometry"]):
             raise ValueError("a local map requires an odometry topic")
         self.create_subscription(LaserScan,self.cfg["scan_topic"],self.on_scan,qos_profile_sensor_data)
         if self.cfg["depth_topic"]:
@@ -125,7 +127,20 @@ class MapObservations(Node):
 
     def on_map_pose(self,msg):
         if msg.header.frame_id == self.cfg["map_frame"] and (not self.slam or self.slam.stage == "ready"):
-            self.map_poses.set_transform(stamped_pose(msg.header,self.cfg["body_frame"],msg.pose),"slam")
+            transform = stamped_pose(msg.header,self.cfg["body_frame"],msg.pose)
+            self.map_poses.set_transform(transform,"slam")
+            if self.cfg["pose_includes_odometry"] and self.out.get_subscription_count():
+                stamp = Time.from_msg(msg.header.stamp).nanoseconds
+                age = self.get_clock().now().nanoseconds-stamp
+                if stamp > self.last_pose and 0 <= age <= self.cfg["slam_timeout_s"]*1e9:
+                    # The source already fused odometry. Its laser-time estimate is a complete map pose.
+                    if self.odom_stamp:
+                        try:
+                            self.align_odometry()
+                        except TransformException:
+                            pass  # Surface projection can wait for overlapping history.
+                    rot,xy = rigid(transform.transform)
+                    self.publish_pose(stamp,rot,xy,True)
 
     def on_odom(self,msg):
         if self.slam and self.slam.stage != "ready":
@@ -144,9 +159,7 @@ class MapObservations(Node):
     def body_in_odom(self,stamp):
         return body_in_odom(self.odom_history,self.tf,self.odom_frames,self.cfg["body_frame"],self.cfg["odom_body_alias"],stamp)
 
-    def odometry_corrected_pose(self):
-        if not self.odom_stamp:
-            return None
+    def align_odometry(self):
         frame = self.cfg["map_frame"]
         odom = self.odom_frames[0]
         try:
@@ -159,27 +172,30 @@ class MapObservations(Node):
         else:
             correction = self.map_poses.lookup_transform(frame,self.cfg["body_frame"],Time())
             stamp = Time.from_msg(correction.header.stamp)
-            candidate = None
-        if stamp.nanoseconds > self.anchor_stamp:
-            if candidate is None:
-                try:
-                    candidate = matrix(correction.transform) @ np.linalg.inv(self.body_in_odom(stamp))
-                except TransformException:
-                    # The next odometry sample may still bracket this laser time.
-                    pass
-            if candidate is not None:
-                if self.anchor is not None:
-                    old = self.anchor @ self.body_in_odom(Time(nanoseconds=self.odom_stamp))
-                    new = candidate @ self.body_in_odom(Time(nanoseconds=self.odom_stamp))
-                    yaw_delta = math.atan2(new[1,0],new[0,0])-math.atan2(old[1,0],old[0,0])
-                    if np.linalg.norm(new[:2,3]-old[:2,3]) > 0.25 or abs(math.atan2(math.sin(yaw_delta),math.cos(yaw_delta))) > math.radians(10):
-                        self.revision += 1
-                self.anchor,self.anchor_stamp = candidate,stamp.nanoseconds
-        now = self.get_clock().now().nanoseconds
-        if self.anchor is None or abs(now-self.anchor_stamp) > self.cfg["slam_timeout_s"]*1e9 or abs(now-self.odom_stamp)>0.5e9:
-            return None
-        pose = self.anchor @ self.body_in_odom(Time(nanoseconds=self.odom_stamp))
-        return self.odom_stamp,pose[:3,:3],pose[:3,3]
+            # Raw laser can lead visual odometry. Evaluate both frames at their latest common time.
+            if stamp.nanoseconds > self.odom_stamp:
+                stamp = Time(nanoseconds=self.odom_stamp)
+                if stamp.nanoseconds <= self.anchor_stamp:
+                    return
+                correction = self.map_poses.lookup_transform(frame,self.cfg["body_frame"],stamp)
+            if stamp.nanoseconds <= self.anchor_stamp:
+                return
+            candidate = matrix(correction.transform) @ np.linalg.inv(self.body_in_odom(stamp))
+        if stamp.nanoseconds <= self.anchor_stamp:
+            return
+        if self.anchor is not None:
+            body = self.body_in_odom(Time(nanoseconds=self.odom_stamp))
+            old,new = self.anchor @ body,candidate @ body
+            yaw_delta = math.atan2(new[1,0],new[0,0])-math.atan2(old[1,0],old[0,0])
+            if np.linalg.norm(new[:2,3]-old[:2,3]) > 0.25 or abs(math.atan2(math.sin(yaw_delta),math.cos(yaw_delta))) > math.radians(10):
+                self.revision += 1
+        self.anchor,self.anchor_stamp = candidate,stamp.nanoseconds
+
+    def publish_pose(self,stamp,rot,xy,odometry_fused):
+        self.send("map_pose",stamp,self.cfg["map_frame"],{"map_id":self.cfg["map_id"],"x":xy[0],"y":xy[1],
+                  "yaw_deg":math.degrees(math.atan2(rot[1,0],rot[0,0])),"localization_revision":self.revision,
+                  "odometry_fused":odometry_fused})
+        self.last_pose = stamp
 
     def in_map(self,source,stamp):
         if not self.cfg["odom_topic"]:
@@ -272,22 +288,22 @@ class MapObservations(Node):
             return
         try:
             if self.cfg["odom_topic"]:
-                result = self.odometry_corrected_pose()
-                if result is None:
-                    if self.anchor is None or self.get_clock().now().nanoseconds-self.anchor_stamp > self.cfg["slam_timeout_s"]*1e9:
-                        return
-                    stamp = self.last_pose
-                else:
-                    stamp,rot,xy = result
-            else:
+                if not self.odom_stamp:
+                    return
+                self.align_odometry()
+                now = self.get_clock().now().nanoseconds
+                if self.anchor is None or abs(now-self.anchor_stamp) > self.cfg["slam_timeout_s"]*1e9:
+                    return
+                if (publish_task and not self.cfg["pose_includes_odometry"] and self.odom_stamp > self.last_pose
+                        and abs(now-self.odom_stamp) <= 0.5e9):
+                    pose = self.anchor @ self.body_in_odom(Time(nanoseconds=self.odom_stamp))
+                    self.publish_pose(self.odom_stamp,pose[:3,:3],pose[:3,3],True)
+            elif publish_task and not self.cfg["pose_includes_odometry"]:
                 tf = self.map_poses.lookup_transform(frame,self.cfg["body_frame"],Time())
                 stamp = Time.from_msg(tf.header.stamp).nanoseconds
-                rot,xy = rigid(tf.transform)
-            if publish_task and stamp > self.last_pose:
-                self.send("map_pose",stamp,frame,{"map_id":self.cfg["map_id"],"x":xy[0],"y":xy[1],
-                         "yaw_deg":math.degrees(math.atan2(rot[1,0],rot[0,0])),"localization_revision":self.revision,
-                         "odometry_fused":bool(self.cfg["odom_topic"])})
-                self.last_pose = stamp
+                if stamp > self.last_pose:
+                    rot,xy = rigid(tf.transform)
+                    self.publish_pose(stamp,rot,xy,False)
         except TransformException as exc:
             self.warn("pose",str(exc))
             if self.cfg["odom_topic"]:
