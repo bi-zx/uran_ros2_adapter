@@ -121,7 +121,7 @@ def patch_projection(points, footprint):
     return idx[inside],u[inside],v[inside],z[inside]
 
 
-def depth_patch_evidence(points, view, margin):
+def depth_patch_evidence(points, view, margin, require_support=False):
     """0 is unresolved, -1 is compatible foreground, +1 is a dense farther surface."""
     (pixels,scale,fx,fy,cx,cy),camera,body_xy = view
     result = np.zeros(len(points),dtype=np.int8)
@@ -140,14 +140,17 @@ def depth_patch_evidence(points, view, margin):
     valid &= dx*dx+dy*dy <= MAPPING_RADIUS_M**2
     nearest = np.min(np.where(valid,metric,np.inf),axis=(1,2))
     farther = nearest > z+margin
-    result[idx[~farther]] = -1
+    foreground = ~farther
+    if require_support:
+        foreground &= nearest >= z-margin
+    result[idx[foreground]] = -1
     confirmed = farther & valid[:,4,4] & (np.sum(valid,axis=(1,2)) >= 69)
     result[idx[confirmed]] = 1
     return result
 
 
-def near_lidar_actions(scan, laser_in_odom, stamp_ns, views, tof_layers, check_range, margin, tolerance_ns, footprint=None):
-    """0 keeps a lidar hit, 1 withholds it, 2 permits a synchronized substitute."""
+def near_lidar_actions(scan, laser_in_odom, stamp_ns, views, tof_layers, check_range, margin, tolerance_ns, footprint=None, require_support=False):
+    """0 keeps lidar, 1 withholds, 2 permits a substitute, 3 permits a nearer measurement only."""
     ranges = np.asarray(scan.ranges,dtype=float)
     action = np.zeros(len(ranges),dtype=np.uint8)
     idx = np.flatnonzero(np.isfinite(ranges) & (ranges>0) & (ranges>=scan.range_min) &
@@ -157,15 +160,17 @@ def near_lidar_actions(scan, laser_in_odom, stamp_ns, views, tof_layers, check_r
     a = scan.angle_min+idx*scan.angle_increment
     measured = np.column_stack((ranges[idx]*np.cos(a),ranges[idx]*np.sin(a),np.zeros(len(idx))))
     world = measured @ laser_in_odom[:3,:3].T+laser_in_odom[:3,3]
-    if footprint is not None:
+    if require_support:
+        action[idx] = 3
+    elif footprint is not None:
         inside,_,_,_ = patch_projection(world,footprint)
         action[idx[inside]] = 1
     views = matching_depth_views(views,stamp_ns,tolerance_ns)
     if views and abs(stamp_ns-views[0][0]) <= tolerance_ns:
-        evidence = depth_patch_evidence(world,views[0][1],margin)
+        evidence = depth_patch_evidence(world,views[0][1],margin,require_support)
         action[idx[evidence<0]] = 0
         disputed = np.flatnonzero(evidence>0)
-        action[idx[disputed]] = 1
+        action[idx[disputed]] = 3 if require_support else 1
         if len(views)==2 and len(disputed):
             repeated = depth_patch_evidence(world[disputed],views[1][1],margin) > 0
             action[idx[disputed[repeated]]] = 2
@@ -188,10 +193,12 @@ def fuse_ranges(scan, laser_in_odom, body_xy, supplements, lidar_action=None):
     indices = np.flatnonzero(valid)
     endpoints = laser_in_odom[:3,3] + ranges[indices,None]*world_unit[indices]
     valid[indices] = within_survey(endpoints,body_xy)
-    allow_supplement = True
+    supplement_limit = np.full(len(ranges),np.inf)
     if lidar_action is not None:
         valid &= lidar_action == 0
-        allow_supplement = lidar_action != 1
+        supplement_limit[lidar_action==1] = 0.0
+        pending = lidar_action==3
+        supplement_limit[pending] = ranges[pending]
     hits = np.full(len(ranges),np.nan)
     source = np.zeros(len(ranges),dtype=np.uint8)
     hits[valid],source[valid] = ranges[valid],1
@@ -210,7 +217,7 @@ def fuse_ranges(scan, laser_in_odom, body_xy, supplements, lidar_action=None):
         paired = (bins[1:]==bins[:-1]) & (np.diff(distance) <= 0.04 + 0.015*distance[:-1])
         supported = np.full(len(ranges),np.inf)
         np.minimum.at(supported,bins[:-1][paired],distance[:-1][paired])
-        take = ~valid & allow_supplement & np.isfinite(supported) & (supported < np.where(np.isfinite(hits),hits,np.inf))
+        take = ~valid & (supported <= supplement_limit) & np.isfinite(supported) & (supported < np.where(np.isfinite(hits),hits,np.inf))
         hits[take],source[take] = supported[take],kind
     # Check the actual emitted beam direction, including the laser mount and body tilt.
     hits = hits.astype(np.float32).astype(float)

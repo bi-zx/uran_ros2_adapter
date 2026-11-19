@@ -24,7 +24,7 @@ class FusedScan(Node):
         defaults = {"scan_topic":"scan", "output_topic":"scan_fused", "body_frame":"base_link", "odom_topic":"odom",
                     "odom_body_alias":"", "ground_frame":"base_footprint", "depth_image_topic":"",
                     "depth_camera_info_topic":"", "depth_topic":"", "sensor_adapter":"", "pair_tolerance_s":0.060,
-                    "depth_check_range_m":0.0, "depth_disagreement_m":0.25, "unknown_range":"nan", "max_wait_s":0.45, "min_ground_height_m":0.08, "depth_pixel_stride":2}
+                    "depth_check_range_m":0.0, "depth_disagreement_m":0.25, "require_near_lidar_support":False, "unknown_range":"nan", "max_wait_s":0.45, "min_ground_height_m":0.08, "depth_pixel_stride":2}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
         if self.cfg["unknown_range"] not in ("nan","zero"):
             raise ValueError("unknown_range must be nan or zero")
@@ -34,6 +34,8 @@ class FusedScan(Node):
             raise ValueError("provide distinct input and output scan topics")
         if self.cfg["depth_check_range_m"] < 0 or self.cfg["depth_disagreement_m"] <= 0:
             raise ValueError("provide a nonnegative cross-check range and a positive depth difference")
+        if self.cfg["require_near_lidar_support"] and not self.cfg["depth_check_range_m"]:
+            raise ValueError("require_near_lidar_support needs a positive depth_check_range_m")
         if self.cfg["depth_check_range_m"] and not self.cfg["depth_image_topic"]:
             raise ValueError("the lidar cross-check requires a calibrated depth image")
         self.tf,self.odom = Buffer(),Buffer()
@@ -123,7 +125,8 @@ class FusedScan(Node):
                 self.warn("lidar_check",exc)
         tof_layers = [points for kind,points in supplements if kind==3]
         return near_lidar_actions(scan,laser,middle,views,tof_layers,self.cfg["depth_check_range_m"],
-                                  self.cfg["depth_disagreement_m"],tolerance_ns,footprint)
+                                  self.cfg["depth_disagreement_m"],tolerance_ns,footprint,
+                                  require_support=self.cfg["require_near_lidar_support"])
 
     def flush(self):
         if not self.frames or not self.pending:

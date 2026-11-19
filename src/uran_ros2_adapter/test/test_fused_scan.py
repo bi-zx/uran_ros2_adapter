@@ -117,3 +117,32 @@ def test_missing_synchronized_depth_cannot_reinsert_a_near_camera_sector_hit():
     assert action.tolist() == [0,0,0,1,0,0,0]
     tof = [np.array([[.48,0,.01]])]
     assert near_lidar_actions(raw,np.eye(4),1000000000,[],tof,1.,.1,60000000,footprint)[3] == 0
+
+
+def test_unreliable_near_lidar_requires_independent_support_across_camera_boundary():
+    from uran_ros2_adapter.map_geometry import near_lidar_actions
+    optical = np.eye(4)
+    optical[:3,:3] = [[0,0,1],[-1,0,0],[0,-1,0]]
+    depth = np.full((65,65),480,dtype=np.uint16)
+    view = ((depth,.001,80,80,32,32),optical,(0,0))
+    footprint = (depth.shape,(80,80,32,32),optical)
+    raw = scan([.5,.5,0,.48,0,.5,1.25])
+    raw.angle_min,raw.angle_increment = -.9,.3
+    now = 1000000000
+    tof = np.array([[.5*math.cos(.6),.5*math.sin(.6),.01]])
+    action = near_lidar_actions(raw,np.eye(4),now,[(now,view)],[tof],1.,.1,60000000,footprint,require_support=True)
+    assert action.tolist() == [3,3,0,0,0,0,0]
+    distant = np.array([[r*math.cos(-.9),r*math.sin(-.9),0] for r in (.9,.91)])
+    closer = np.array([[r*math.cos(-.6),r*math.sin(-.6),0] for r in (.28,.29)])
+    hits,source = fuse_ranges(raw,np.eye(4),(0,0),[(2,distant),(3,closer)],action)
+    assert source.tolist() == [0,3,0,1,0,1,1]
+    assert np.isnan(hits[0]) and np.isclose(hits[1],.28)
+    depth[:] = 260
+    action = near_lidar_actions(raw,np.eye(4),now,[(now,view)],[],1.,.1,60000000,footprint,require_support=True)
+    assert action[3] == 3
+    depth[:] = 0
+    assert near_lidar_actions(raw,np.eye(4),now,[(now,view)],[],1.,.1,60000000,footprint,require_support=True)[3] == 3
+    depth[:] = 1000
+    views = [(now,view),(now-70000000,view)]
+    assert near_lidar_actions(raw,np.eye(4),now,views[:1],[],1.,.1,60000000,footprint,require_support=True)[3] == 3
+    assert near_lidar_actions(raw,np.eye(4),now,views,[],1.,.1,60000000,footprint,require_support=True)[3] == 2
