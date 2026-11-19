@@ -10,17 +10,18 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from uran_ros2_adapter.depth_images import subscribe_depth
 from rclpy.time import Time
 from uran_ros2_adapter.map_geometry import rigid, matrix, stamped_pose, odometry_transform, body_in_odom, within_survey, cloud_points, rectified_depth_points
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, NavSatFix
+from sensor_msgs.msg import LaserScan, PointCloud2, NavSatFix
 from tf2_ros import Buffer, TransformException, TransformListener
 from uran_ros2_msgs.msg import ContractEnvelope, OperationEvent
 
 
 class MapObservations(Node):
-    def __init__(self):
+    def __init__(self, depth_readers=None):
         super().__init__("map_observations")
         defaults = {"map_id":"","map_frame":"map","body_frame":"base_link","ground_frame":"base_footprint",
                     "device_id":"","component_id":"","instance_id":"","source_component":"sensors",
@@ -70,8 +71,7 @@ class MapObservations(Node):
             self.create_subscription(PointCloud2,self.cfg["depth_topic"],lambda m:self.queue("depth",m,m.header.stamp),qos_profile_sensor_data)
         if self.cfg["depth_image_topic"]:
             self.camera_info = None
-            self.create_subscription(CameraInfo,self.cfg["depth_camera_info_topic"],self.on_camera_info,qos_profile_sensor_data)
-            self.create_subscription(Image,self.cfg["depth_image_topic"],lambda m:self.queue("depth_image",m,m.header.stamp),qos_profile_sensor_data)
+            subscribe_depth(self,depth_readers,self.on_camera_info,lambda m:self.queue("depth_image",m,m.header.stamp))
         if self.cfg["sensor_adapter"]:
             module,factory = self.cfg["sensor_adapter"].split(":")
             getattr(import_module(module),factory)(self)
@@ -274,6 +274,11 @@ class MapObservations(Node):
                     self.map_poses.clear()
                 return
         frame = self.cfg["map_frame"]
+        publish_task = self.out.get_subscription_count() > 0
+        publish_surface = self.surface_out is not None and self.surface_out.get_subscription_count()>0
+        collect_depth = time.monotonic() >= self.next_depth
+        if not publish_task and not (publish_surface and collect_depth):
+            return
         try:
             if self.cfg["odom_topic"]:
                 result = self.odometry_corrected_pose()
@@ -284,7 +289,7 @@ class MapObservations(Node):
                 tf = self.map_poses.lookup_transform(frame,self.cfg["body_frame"],Time())
                 stamp = Time.from_msg(tf.header.stamp).nanoseconds
                 rot,xy = rigid(tf.transform)
-            if stamp > self.last_pose:
+            if publish_task and stamp > self.last_pose:
                 self.send("map_pose",stamp,frame,{"map_id":self.cfg["map_id"],"x":xy[0],"y":xy[1],
                          "yaw_deg":math.degrees(math.atan2(rot[1,0],rot[0,0])),"localization_revision":self.revision,
                          "odometry_fused":bool(self.cfg["odom_topic"])})
@@ -294,15 +299,16 @@ class MapObservations(Node):
             if self.cfg["odom_topic"]:
                 return
         now = self.get_clock().now().nanoseconds
-        collect_depth = time.monotonic() >= self.next_depth
-        publish_surface = self.surface_out is not None and self.surface_out.get_subscription_count()>0
         depth_processed = False
         for name,pending in self.pending.items():
+            if name == "scan" and not publish_task:
+                pending.clear()
+                continue
             if name != "scan" and not collect_depth:
                 continue
             for stamp,msg in reversed(pending):
                 age = (now-stamp.nanoseconds)*1e-9
-                task_fresh = abs(age)<=0.3
+                task_fresh = publish_task and abs(age)<=0.3
                 map_fresh = name!="scan" and publish_surface and 0<=age<=self.cfg["surface_max_age_s"]
                 if not (task_fresh or map_fresh):
                     self.warn(name+"-stamp","{} acquisition stamp is unavailable or stale".format(name))

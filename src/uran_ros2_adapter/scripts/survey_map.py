@@ -62,6 +62,9 @@ class SurveyMap(Node):
             self.last_warning = now
 
     def on_grid(self,msg):
+        # The SLAM mapper publishes an empty grid until its first submap is ready.
+        if not msg.info.width or not msg.info.height or msg.info.resolution <= 0:
+            return
         if msg.header.frame_id == self.cfg["map_frame"]:
             self.grid = msg
             self.redraw = True

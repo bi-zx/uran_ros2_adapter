@@ -69,6 +69,9 @@ install(PROGRAMS scripts/map_observations.py DESTINATION lib/${PROJECT_NAME} REN
 install(PROGRAMS scripts/fused_scan.py DESTINATION lib/${PROJECT_NAME} RENAME fused_scan)
 install(PROGRAMS scripts/survey_map.py DESTINATION lib/${PROJECT_NAME} RENAME survey_map)
 ament_python_install_package(${PROJECT_NAME})
+ament_get_python_install_dir(uran_python_dir)
+install(FILES scripts/fused_scan.py scripts/map_observations.py DESTINATION "${uran_python_dir}/${PROJECT_NAME}")
+install(PROGRAMS scripts/survey_sensors.py DESTINATION lib/${PROJECT_NAME} RENAME survey_sensors)
 install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(uran_ros2_adapterTargets HAS_LIBRARY_TARGET)
 ament_export_dependencies(

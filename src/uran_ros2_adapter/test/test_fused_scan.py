@@ -278,3 +278,17 @@ def test_tilted_floor_correction_keeps_a_step_and_a_drop():
     for stamp in (11,22):
         survey.observe_surfaces(beams,[0,0,0],.045,.45,stamp)
     assert [survey.surfaces[(32,y)][0] for y in (0,2,4)] == [-2,2,2]
+
+
+def test_delayed_scan_processing_selects_latest_supported_exposure():
+    from collections import deque
+    from uran_ros2_adapter.map_geometry import take_ready_scan
+
+    # The last two scans still need newer depth or a new pose.
+    ms = 10**6
+    pending = deque([(9.0,100*ms,"old"),(9.1,200*ms,"ready"),(9.85,400*ms,"waiting_depth"),(9.98,900*ms,"latest")])
+    assert take_ready_scan(pending,10.0,0.05,0.45,500*ms,260*ms) == "ready"
+    assert [s[2] for s in pending] == ["waiting_depth","latest"]
+    assert take_ready_scan(pending,10.01,0.05,0.45,500*ms,460*ms) == "waiting_depth"
+    assert take_ready_scan(pending,10.6,0.05,0.45,500*ms,460*ms) is None
+    assert not pending

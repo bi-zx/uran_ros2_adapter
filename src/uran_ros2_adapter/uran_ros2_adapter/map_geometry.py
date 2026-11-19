@@ -5,6 +5,21 @@ import numpy as np
 from geometry_msgs.msg import TransformStamped
 
 
+def take_ready_scan(pending, now, tolerance_s, max_wait_s, odom_ns, depth_ns):
+    """Take the newest ready scan, leaving newer exposures queued for their sensor data."""
+    selected = None
+    while pending:
+        received, stamp, scan = pending[0]
+        age = now-received
+        enough_history = min(odom_ns,depth_ns) >= stamp + tolerance_s*1e9
+        if age < tolerance_s or (age < max_wait_s and not enough_history):
+            break
+        pending.popleft()
+        if stamp <= odom_ns:
+            selected = scan
+    return selected
+
+
 def rigid(transform):
     q, t = transform.rotation, transform.translation
     x, y, z, w = q.x, q.y, q.z, q.w

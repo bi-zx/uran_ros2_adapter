@@ -8,18 +8,19 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from uran_ros2_adapter.depth_images import subscribe_depth
 from rclpy.time import Time
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
+from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from uran_ros2_adapter.map_geometry import (NearSurfaceHistory, body_in_odom, cloud_points, fuse_ranges, matching_depth_views, matrix,
                                            near_lidar_actions, odometry_transform, rectified_depth_model,
-                                           rectified_depth_points, rectified_intrinsics, synchronized_scan_points, within_survey)
+                                           rectified_depth_points, rectified_intrinsics, synchronized_scan_points, take_ready_scan, within_survey)
 
 
 class FusedScan(Node):
-    def __init__(self):
+    def __init__(self, depth_readers=None):
         super().__init__("fused_scan")
         defaults = {"scan_topic":"scan", "output_topic":"scan_fused", "body_frame":"base_link", "odom_topic":"odom",
                     "odom_body_alias":"", "ground_frame":"base_footprint", "depth_image_topic":"",
@@ -59,8 +60,7 @@ class FusedScan(Node):
         if self.cfg["depth_topic"]:
             self.create_subscription(PointCloud2,self.cfg["depth_topic"],lambda m:self.queue("cloud",m,m.header.stamp),qos_profile_sensor_data)
         if self.cfg["depth_image_topic"]:
-            self.create_subscription(CameraInfo,self.cfg["depth_camera_info_topic"],self.on_info,qos_profile_sensor_data)
-            self.create_subscription(Image,self.cfg["depth_image_topic"],lambda m:self.queue("image",m,m.header.stamp),qos_profile_sensor_data)
+            subscribe_depth(self,depth_readers,self.on_info,lambda m:self.queue("image",m,m.header.stamp))
         if self.cfg["sensor_adapter"]:
             module,factory = self.cfg["sensor_adapter"].split(":")
             getattr(import_module(module),factory)(self)
@@ -87,7 +87,7 @@ class FusedScan(Node):
 
     def on_scan(self,msg):
         if len(msg.ranges) and msg.angle_increment:
-            self.pending.append((time.monotonic(),msg))
+            self.pending.append((time.monotonic(),Time.from_msg(msg.header.stamp).nanoseconds,msg))
 
     def queue(self,name,msg,stamp):
         self.layers.setdefault(name,deque(maxlen=12)).append((Time.from_msg(stamp),msg))
@@ -140,16 +140,16 @@ class FusedScan(Node):
     def flush(self):
         if not self.frames or not self.pending:
             return
-        received,scan = self.pending[0]
         tolerance = self.cfg["pair_tolerance_s"]
-        stamp = Time.from_msg(scan.header.stamp)
-        age = time.monotonic()-received
-        latest = stamp.nanoseconds+tolerance*1e9
-        depth_names = [key for key,topic in (("image","depth_image_topic"),("cloud","depth_topic")) if self.cfg[topic]]
-        awaiting_depth = any(not self.layers.get(key) or self.layers[key][-1][0].nanoseconds < latest for key in depth_names)
-        if age < tolerance or (age < self.cfg["max_wait_s"] and (self.odom_stamp < latest or awaiting_depth)):
+        depth_ns = self.odom_stamp
+        for key,topic in (("image","depth_image_topic"),("cloud","depth_topic")):
+            if self.cfg[topic]:
+                frames = self.layers.get(key)
+                depth_ns = min(depth_ns,frames[-1][0].nanoseconds if frames else 0)
+        scan = take_ready_scan(self.pending,time.monotonic(),tolerance,self.cfg["max_wait_s"],self.odom_stamp,depth_ns)
+        if scan is None:
             return
-        self.pending.popleft()
+        stamp = Time.from_msg(scan.header.stamp)
         try:
             pose = self.pose(stamp)
             laser = pose @ self.mount(scan.header.frame_id,stamp)

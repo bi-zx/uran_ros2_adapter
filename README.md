@@ -63,6 +63,8 @@ laser and pose streams ran independently.
 
 ### Bounded mapping
 
+On devices where both mapping nodes use the same rectified depth camera, `ros2 run uran_ros2_adapter survey_sensors` runs `fused_scan` and `map_observations` together. The nodes share one subscription per resolved depth image and camera-info topic. Configure each node by name with standard ROS parameters and remaps. Give `map_observations` the fused scan as its mapping input. The standalone executables use the same sensor-processing code.
+
 Run `ros2 run uran_ros2_adapter fused_scan` before starting SLAM. The node accepts an odometry topic, calibrated rectified depth or an XYZ cloud, and optionally a ToF adapter. It publishes `scan_fused` in the original laser frame. Finite laser hits normally take priority. Depth and ToF can fill a missing beam with two nearby measured returns in a 5 cm slice centered on the scan plane. The body pose at each acquisition compensates sensor motion. The window defaults to 60 ms and the ground clearance for supplemental points to 8 cm. Set the floor frame to the local ground reference. Topics and mount frames are device parameters.
 
 The horizontal observation radius is 5 m about the body at acquisition. A distant hit supplies no map update. The per-beam `scan_fused/sources` mono8 image has the scan timestamp and encodes unknown (0), lidar (1), depth (2) and ToF (3). Standard output uses NaN for unknown. Set `unknown_range:=zero` for a scanner consumer that expects zero below its minimum range. Feed this buffered stream to both mapping and localization. A low-latency motion controller can continue consuming the physical scan.
