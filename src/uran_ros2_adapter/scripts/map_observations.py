@@ -12,7 +12,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from uran_ros2_adapter.depth_images import subscribe_depth
 from rclpy.time import Time
-from uran_ros2_adapter.map_geometry import rigid, matrix, stamped_pose, odometry_transform, body_in_odom, within_survey, cloud_points, rectified_depth_points
+from uran_ros2_adapter.map_geometry import rigid, scan_in_body, matrix, stamped_pose, odometry_transform, body_in_odom, within_survey, cloud_points, rectified_depth_points
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan, PointCloud2, NavSatFix
@@ -201,27 +201,7 @@ class MapObservations(Node):
 
     def scan(self,msg,stamp):
         rot,offset = rigid(self.tf.lookup_transform(self.cfg["body_frame"],msg.header.frame_id,stamp).transform)
-        ranges = np.asarray(msg.ranges)
-        angles = msg.angle_min + np.arange(len(ranges))*msg.angle_increment
-        count = round(2*math.pi/abs(msg.angle_increment))
-        increment = 2*math.pi/count
-        result = [None]*count
-        unit = np.column_stack((np.cos(angles),np.sin(angles),np.zeros(len(angles)))) @ rot.T
-        for vector,r in zip(unit,ranges):
-            if np.isposinf(r):
-                # Only the direction is observable for an unbounded ray.
-                x,y = vector[:2]
-                distance = "inf"
-            elif math.isfinite(r) and msg.range_min <= r <= msg.range_max and r > 0:
-                x,y = (r*vector + offset)[:2]
-                distance = math.hypot(x,y)
-            else:
-                continue
-            i = round((math.atan2(y,x)+math.pi)/increment) % count
-            if not isinstance(result[i],float) or (distance != "inf" and distance < result[i]):
-                result[i] = distance
-        self.send("laser_scan",stamp.nanoseconds,self.cfg["body_frame"],{"angle_min":-math.pi,"angle_max":math.pi-increment,
-            "angle_increment":increment,"range_min":msg.range_min,"range_max":msg.range_max+float(np.linalg.norm(offset)),"ranges":result})
+        self.send("laser_scan",stamp.nanoseconds,self.cfg["body_frame"],scan_in_body(msg,rot,offset))
 
     def depth(self,name,msg,stamp,task_fresh,publish_surface):
         if name in ("depth","depth_image"):
