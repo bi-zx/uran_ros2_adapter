@@ -101,6 +101,21 @@ def body_in_odom(history, tf, frames, body_frame, body_alias, stamp):
     return pose
 
 
+def scan_bins(scan, points):
+    middle = scan.angle_min+(len(scan.ranges)-1)*scan.angle_increment/2
+    angles = np.arctan2(points[:,1],points[:,0])
+    angles += 2*np.pi*np.rint((middle-angles)/(2*np.pi))
+    return np.rint((angles-scan.angle_min)/scan.angle_increment).astype(int)
+
+
+def synchronized_scan_points(scan, points, exposure_offset_ns, tolerance_ns):
+    """Keep measured scan-plane points synchronized to the laser ray they can fill."""
+    planar = points[abs(points[:,2]) <= .025]
+    bins = scan_bins(scan,planar)
+    timely = abs(bins*(scan.time_increment*1e9)-exposure_offset_ns) <= tolerance_ns
+    return planar[timely & (bins>=0) & (bins<len(scan.ranges))]
+
+
 def matching_depth_views(views, stamp_ns, tolerance_ns):
     """Closest exposure, then an earlier independent exposure in the last 350 ms."""
     recent = [(t,v) for t,v in views if stamp_ns-350000000 <= t <= stamp_ns+tolerance_ns]
@@ -111,13 +126,13 @@ def matching_depth_views(views, stamp_ns, tolerance_ns):
     return [first,max(earlier,key=lambda row:row[0])] if earlier else [first]
 
 
-def patch_projection(points, footprint):
+def patch_projection(points, footprint, border=4):
     (h,w),(fx,fy,cx,cy),camera = footprint
     optical = (points-camera[:3,3]) @ camera[:3,:3]
     idx = np.flatnonzero(optical[:,2] > 0)
     x,y,z = optical[idx].T
     u,v = np.rint(fx*x/z+cx).astype(int),np.rint(fy*y/z+cy).astype(int)
-    inside = (u>=4)&(u<w-4)&(v>=4)&(v<h-4)
+    inside = (u>=border)&(u<w-border)&(v>=border)&(v<h-border)
     return idx[inside],u[inside],v[inside],z[inside]
 
 
@@ -149,8 +164,68 @@ def depth_patch_evidence(points, view, margin, require_support=False):
     return result
 
 
-def near_lidar_actions(scan, laser_in_odom, stamp_ns, views, tof_layers, check_range, margin, tolerance_ns, footprint=None, require_support=False):
-    """0 keeps lidar, 1 withholds, 2 permits a substitute, 3 permits a nearer measurement only."""
+class NearSurfaceHistory:
+    """Confirm observed points on short laser line segments in two odometry-aligned scans."""
+
+    def __init__(self, max_range):
+        self.max_range = max_range
+        self.previous = None
+
+    def update(self, scan, laser_in_odom, stamp_ns):
+        ranges = np.asarray(scan.ranges,dtype=float)
+        supported = np.zeros(len(ranges),dtype=bool)
+        previous = self.previous
+        if previous is not None and stamp_ns <= previous[0]:
+            return supported
+        valid = np.isfinite(ranges) & (ranges>0) & (ranges>=scan.range_min) & (ranges<=min(self.max_range,scan.range_max))
+        beams = np.flatnonzero(valid)
+        angles = scan.angle_min + beams*scan.angle_increment
+        points = np.column_stack((ranges[beams]*np.cos(angles),ranges[beams]*np.sin(angles)))
+        self.previous = stamp_ns, points @ laser_in_odom[:3,:2].T + laser_in_odom[:3,3]
+        if previous is None or stamp_ns-previous[0] > 350000000 or len(beams)<6:
+            return supported
+
+        old = (previous[1]-laser_in_odom[:3,3]) @ laser_in_odom[:3,:3]
+        old = old[abs(old[:,2]) <= .025]
+        bins = scan_bins(scan,old)
+        inside = (bins>=0)&(bins<len(ranges))
+        # Allow one bin of angular quantization when comparing the two scans.
+        prior_ranges = np.full(len(ranges)+2,np.inf)
+        np.minimum.at(prior_ranges,bins[inside]+1,np.hypot(old[inside,0],old[inside,1]))
+        repeat_error = abs(prior_ranges[beams[:,None]+np.arange(3)]-ranges[beams,None])
+        repeated = np.min(repeat_error,axis=1) <= .020
+
+        gaps = (np.diff(beams)>2) | (np.linalg.norm(np.diff(points,axis=0),axis=1)>.030)
+        runs = np.split(np.arange(len(beams)),np.flatnonzero(gaps)+1)
+        while runs:
+            run = runs.pop()
+            if len(run)<6:
+                continue
+            segment = points[run]
+            chord = segment[-1]-segment[0]
+            length = np.linalg.norm(chord)
+            if length<.08:
+                continue
+            normal = np.array([-chord[1],chord[0]])/length
+            error = abs((segment-segment[0]) @ normal)
+            inliers = error <= .014
+            if np.mean(inliers)<.90:
+                split = int(np.argmax(error))
+                runs.extend((run[:split+1],run[split:]))
+                continue
+            confirmed = run[inliers & repeated[run]]
+            if len(confirmed)<max(6,.75*len(run)) or np.linalg.norm(points[confirmed[-1]]-points[confirmed[0]])<.08:
+                continue
+            # A body-fixed ring also repeats. Require a better fit to a line than to a constant radius.
+            centered = points[confirmed]-np.mean(points[confirmed],axis=0)
+            line_variance = np.linalg.eigvalsh(centered.T @ centered)[0]/len(confirmed)
+            if math.sqrt(max(0.0,line_variance))+.001 < np.std(ranges[beams[confirmed]]):
+                supported[beams[confirmed]] = True
+        return supported
+
+
+def near_lidar_actions(scan, laser_in_odom, stamp_ns, views, tof_layers, check_range, margin, tolerance_ns, footprint=None, require_support=False, blind_surface=None, ray_step_ns=0):
+    """0 keeps lidar, 1 withholds, 2 permits substitution, 3 permits nearer hits, 4 keeps a blind surface."""
     ranges = np.asarray(scan.ranges,dtype=float)
     action = np.zeros(len(ranges),dtype=np.uint8)
     idx = np.flatnonzero(np.isfinite(ranges) & (ranges>0) & (ranges>=scan.range_min) &
@@ -162,12 +237,20 @@ def near_lidar_actions(scan, laser_in_odom, stamp_ns, views, tof_layers, check_r
     world = measured @ laser_in_odom[:3,:3].T+laser_in_odom[:3,3]
     if require_support:
         action[idx] = 3
+        if blind_surface is not None and footprint is not None:
+            visible,_,_,_ = patch_projection(world,footprint,border=0)
+            blind = blind_surface[idx].copy()
+            blind[visible] = False
+            action[idx[blind]] = 4
     elif footprint is not None:
         inside,_,_,_ = patch_projection(world,footprint)
         action[idx[inside]] = 1
-    views = matching_depth_views(views,stamp_ns,tolerance_ns)
-    if views and abs(stamp_ns-views[0][0]) <= tolerance_ns:
+    half_duration = abs(ray_step_ns)*(len(ranges)-1)/2
+    views = matching_depth_views(views,stamp_ns,tolerance_ns+half_duration)
+    if views and abs(stamp_ns-views[0][0]) <= tolerance_ns+half_duration:
         evidence = depth_patch_evidence(world,views[0][1],margin,require_support)
+        offsets = (idx-(len(ranges)-1)/2)*ray_step_ns
+        evidence[abs((stamp_ns-views[0][0])+offsets)>tolerance_ns] = 0
         action[idx[evidence<0]] = 0
         disputed = np.flatnonzero(evidence>0)
         action[idx[disputed]] = 3 if require_support else 1
@@ -195,19 +278,16 @@ def fuse_ranges(scan, laser_in_odom, body_xy, supplements, lidar_action=None):
     valid[indices] = within_survey(endpoints,body_xy)
     supplement_limit = np.full(len(ranges),np.inf)
     if lidar_action is not None:
-        valid &= lidar_action == 0
+        valid &= (lidar_action == 0) | (lidar_action == 4)
         supplement_limit[lidar_action==1] = 0.0
         pending = lidar_action==3
         supplement_limit[pending] = ranges[pending]
     hits = np.full(len(ranges),np.nan)
     source = np.zeros(len(ranges),dtype=np.uint8)
     hits[valid],source[valid] = ranges[valid],1
-    middle = (angles[0]+angles[-1])/2
     for kind,points in supplements:
         distance = np.hypot(points[:,0],points[:,1])
-        angle = np.arctan2(points[:,1],points[:,0])
-        angle += 2*math.pi*np.rint((middle-angle)/(2*math.pi))
-        bins = np.rint((angle-scan.angle_min)/scan.angle_increment).astype(int)
+        bins = scan_bins(scan,points)
         take = ((abs(points[:,2]) <= 0.025) & (distance > 0) & (distance >= scan.range_min) &
                 (distance <= scan.range_max) & (bins >= 0) & (bins < len(ranges)))
         bins,distance = bins[take],distance[take]

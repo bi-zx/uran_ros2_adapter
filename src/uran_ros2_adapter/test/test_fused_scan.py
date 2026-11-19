@@ -146,3 +146,85 @@ def test_unreliable_near_lidar_requires_independent_support_across_camera_bounda
     views = [(now,view),(now-70000000,view)]
     assert near_lidar_actions(raw,np.eye(4),now,views[:1],[],1.,.1,60000000,footprint,require_support=True)[3] == 3
     assert near_lidar_actions(raw,np.eye(4),now,views,[],1.,.1,60000000,footprint,require_support=True)[3] == 2
+
+
+def test_short_blind_surface_needs_a_repeated_measured_line():
+    from uran_ros2_adapter.map_geometry import NearSurfaceHistory, near_lidar_actions
+    history = NearSurfaceHistory(.35)
+    raw = scan(np.zeros(241))
+    raw.angle_min,raw.angle_increment = -1.2,.01
+    angles = raw.angle_min + np.arange(241)*raw.angle_increment
+    left,right = angles>.65,angles<-.65
+    raw.ranges[left] = .18/np.sin(angles[left])
+    raw.ranges[right] = -.20/np.sin(angles[right])
+    raw.ranges[110:113] = .15  # isolated cluster
+    raw.ranges[194:196] = 0   # a gap in the left panel
+    first = np.eye(4)
+    assert not history.update(raw,first,1000000000).any()
+    second = np.eye(4)
+    second[1,3] = .012
+    raw.ranges[left] = .168/np.sin(angles[left])
+    raw.ranges[right] = -.212/np.sin(angles[right])
+    raw.ranges[194:196] = 0
+    confirmed = history.update(raw,second,1100000000)
+    assert confirmed[left].sum()>30 and confirmed[right].sum()>30
+    assert not confirmed[194:196].any() and not confirmed[110:113].any()
+    camera = second.copy()
+    camera[:3,:3] = [[0,0,1],[-1,0,0],[0,-1,0]]
+    footprint = ((101,101),(100,100,50,50),camera)
+    action = near_lidar_actions(raw,second,1100000000,[],[],1.,.05,60000000,footprint,True,confirmed)
+    hits,src = fuse_ranges(raw,second,second[:2,3],[],action)
+    assert np.all(action[confirmed]==4) and np.all(src[confirmed]==1)
+    assert np.allclose(hits[confirmed],raw.ranges[confirmed])
+    assert np.isnan(hits[194:196]).all()
+    assert not history.update(raw,second,1800000000).any()
+    shifted = second.copy()
+    shifted[1,3] += .12
+    assert not history.update(raw,shifted,1900000000).any()
+
+
+def test_visible_but_missing_or_contradictory_depth_overrules_lidar_shape():
+    from uran_ros2_adapter.map_geometry import near_lidar_actions
+    camera = np.eye(4)
+    camera[:3,:3] = [[0,0,1],[-1,0,0],[0,-1,0]]
+    raw = scan([.27]*7)
+    raw.angle_min,raw.angle_increment = -.6,.2
+    footprint = ((81,81),(80,80,40,40),camera)
+    support = np.ones(7,dtype=bool)
+    current = 1000000000
+    action = near_lidar_actions(raw,np.eye(4),current,[],[],1.,.05,60000000,footprint,True,support)
+    assert action.tolist()==[4,3,3,3,3,3,4]
+    depth = np.full((81,81),650,dtype=np.uint16)
+    view = ((depth,.001,80,80,40,40),camera,(0,0))
+    action = near_lidar_actions(raw,np.eye(4),current,[(current,view),(current-70000000,view)],[],1.,.05,60000000,footprint,True,support)
+    assert action[3]==2
+
+
+def test_repeating_constant_radius_ring_does_not_confirm_a_wall():
+    from uran_ros2_adapter.map_geometry import NearSurfaceHistory
+    history = NearSurfaceHistory(.35)
+    raw = scan(np.full(240,.22))
+    raw.angle_min,raw.angle_increment = -1.2,.01
+    history.update(raw,np.eye(4),1000000000)
+    assert not history.update(raw,np.eye(4),1100000000).any()
+
+
+def test_depth_uses_acquisition_time_of_each_ray_and_replacement():
+    from uran_ros2_adapter.map_geometry import near_lidar_actions, synchronized_scan_points
+    camera = np.eye(4)
+    camera[:3,:3] = [[0,0,1],[-1,0,0],[0,-1,0]]
+    raw = scan([.27]*7)
+    raw.time_increment = .020
+    depth = np.full((85,85),800,dtype=np.uint16)
+    view = ((depth,.001,70,70,42,42),camera,(0,0))
+    footprint = (depth.shape,(70,70,42,42),camera)
+    start = 1000000000
+    mid = start+60000000
+    exposure = start+70000000
+    frames = [(exposure,view),(exposure-80000000,view)]
+    action = near_lidar_actions(raw,np.eye(4),mid,frames,[],1.,.05,25000000,footprint,True,ray_step_ns=20000000)
+    assert action.tolist() == [3,3,3,2,2,3,3]
+    pts = np.vstack([returns(i,[.8,.80]) for i in range(7)])
+    paired = synchronized_scan_points(raw,pts,exposure-start,25000000)
+    hits,src = fuse_ranges(raw,np.eye(4),(0,0),[(2,paired)],action)
+    assert src.tolist() == [0,0,0,2,2,0,0] and np.allclose(hits[3:5],.8)
