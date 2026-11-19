@@ -11,7 +11,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from uran_ros2_adapter.map_geometry import rigid, matrix, odometry_transform, body_in_odom, within_survey, cloud_points, rectified_depth_points
+from uran_ros2_adapter.map_geometry import rigid, matrix, stamped_pose, odometry_transform, body_in_odom, within_survey, cloud_points, rectified_depth_points
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, NavSatFix
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -23,7 +24,7 @@ class MapObservations(Node):
         super().__init__("map_observations")
         defaults = {"map_id":"","map_frame":"map","body_frame":"base_link","ground_frame":"base_footprint",
                     "device_id":"","component_id":"","instance_id":"","source_component":"sensors",
-                    "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0,
+                    "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"",
                     "scan_topic":"scan","depth_topic":"","depth_origin_frame":"","gps_topic":"",
                     "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,"sensor_adapter":"","slam_adapter":""}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
@@ -39,6 +40,10 @@ class MapObservations(Node):
             raise ValueError("provide a depth cloud, rectified depth image or a sensor adapter")
         self.tf = Buffer()
         self.listener = TransformListener(self.tf,self)
+        self.map_poses = self.tf
+        if self.cfg["pose_topic"]:
+            self.map_poses = Buffer()
+            self.create_subscription(PoseStamped,self.cfg["pose_topic"],self.on_map_pose,qos_profile_sensor_data)
         self.odom_history = Buffer()
         self.odom_frames = None
         self.odom_stamp = self.anchor_stamp = self.revision = 0
@@ -105,6 +110,10 @@ class MapObservations(Node):
         if self.cfg["reference_mode"] == "geographic" and stamp and (not self.slam or self.slam.stage == "ready"):
             self.send("gps_fix",stamp,"wgs84",dict(latitude_deg=lat,longitude_deg=lon,**quality))
 
+    def on_map_pose(self,msg):
+        if msg.header.frame_id == self.cfg["map_frame"] and (not self.slam or self.slam.stage == "ready"):
+            self.map_poses.set_transform(stamped_pose(msg.header,self.cfg["body_frame"],msg.pose),"slam")
+
     def on_odom(self,msg):
         if self.slam and self.slam.stage != "ready":
             return
@@ -128,14 +137,14 @@ class MapObservations(Node):
         frame = self.cfg["map_frame"]
         odom = self.odom_frames[0]
         try:
-            correction = self.tf.lookup_transform(frame,odom,Time())
+            correction = None if self.cfg["pose_topic"] else self.tf.lookup_transform(frame,odom,Time())
         except TransformException:
             correction = None
         if correction is not None and Time.from_msg(correction.header.stamp).nanoseconds:
             stamp = Time.from_msg(correction.header.stamp)
             candidate = matrix(correction.transform)
         else:
-            correction = self.tf.lookup_transform(frame,self.cfg["body_frame"],Time())
+            correction = self.map_poses.lookup_transform(frame,self.cfg["body_frame"],Time())
             stamp = Time.from_msg(correction.header.stamp)
             candidate = None
         if stamp.nanoseconds > self.anchor_stamp:
@@ -161,6 +170,10 @@ class MapObservations(Node):
 
     def in_map(self,source,stamp):
         if not self.cfg["odom_topic"]:
+            if self.cfg["pose_topic"]:
+                pose = matrix(self.map_poses.lookup_transform(self.cfg["map_frame"],self.cfg["body_frame"],stamp).transform)
+                pose = pose @ matrix(self.tf.lookup_transform(self.cfg["body_frame"],source,stamp).transform)
+                return pose[:3,:3],pose[:3,3]
             return rigid(self.tf.lookup_transform(self.cfg["map_frame"],source,stamp).transform)
         assert self.anchor is not None
         mount = self.tf.lookup_transform(self.cfg["body_frame"],source,stamp)
@@ -249,6 +262,8 @@ class MapObservations(Node):
                 self.layers.clear()
                 self.last_pose = self.last_depth = self.odom_stamp = self.anchor_stamp = 0
                 self.anchor = self.odom_frames = None
+                if self.cfg["pose_topic"]:
+                    self.map_poses.clear()
                 return
         frame = self.cfg["map_frame"]
         try:
@@ -258,7 +273,7 @@ class MapObservations(Node):
                     return
                 stamp,rot,xy = result
             else:
-                tf = self.tf.lookup_transform(frame,self.cfg["body_frame"],Time())
+                tf = self.map_poses.lookup_transform(frame,self.cfg["body_frame"],Time())
                 stamp = Time.from_msg(tf.header.stamp).nanoseconds
                 rot,xy = rigid(tf.transform)
             if stamp > self.last_pose:

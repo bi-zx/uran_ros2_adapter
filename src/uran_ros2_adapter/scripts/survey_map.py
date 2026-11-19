@@ -13,7 +13,7 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from uran_ros2_adapter.map_geometry import matrix, within_survey
+from uran_ros2_adapter.map_geometry import matrix, stamped_pose, within_survey
 from uran_ros2_adapter.survey_coverage import SurveyCoverage
 
 
@@ -43,12 +43,8 @@ class SurveyMap(Node):
         self.create_timer(1.0,self.draw)
 
     def pose(self,msg):
-        t = TransformStamped()
-        t.header,t.child_frame_id = msg.header,self.cfg["body_frame"]
-        p = msg.pose.position
-        t.transform.translation.x,t.transform.translation.y,t.transform.translation.z = p.x,p.y,p.z
-        t.transform.rotation = msg.pose.orientation
-        self.poses.set_transform(t,"slam")
+        if msg.header.frame_id == self.cfg["map_frame"]:
+            self.poses.set_transform(stamped_pose(msg.header,self.cfg["body_frame"],msg.pose),"slam")
 
     def warn(self,text):
         now = time.monotonic()

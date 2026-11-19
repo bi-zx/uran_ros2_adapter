@@ -36,6 +36,9 @@ def test_boundary_is_horizontal_body_centered_and_inclusive():
     raw.ranges[3] = 4.751
     ranges,sources = fuse_ranges(raw,laser,body,[])
     assert np.isnan(ranges).all()
+    near = np.array(returns(3,[2.0,2.01]))
+    ranges,sources = fuse_ranges(raw,laser,body,[(2,near)])
+    assert sources[3] == 2 and ranges[3] == 2.0
     assert within_survey(np.array([[13,2,15],[13,2.001,0]]),body).tolist() == [True,False]
 
 
@@ -46,7 +49,7 @@ def test_rotated_offset_and_laser_returns_beyond_radius_do_not_clear_space():
     raw = scan([math.inf,8,0,5.19,5.4,0,0])
     ranges,sources = fuse_ranges(raw,transform,(12,2.2),[])
     assert sources.tolist() == [0,0,0,1,0,0,0]
-    assert math.isclose(ranges[3],5.19)
+    assert np.isclose(ranges[3],5.19)
 
 
 def test_vendor_raster_spill_is_unknown_and_observed_history_reopens(tmp_path):
@@ -60,3 +63,15 @@ def test_vendor_raster_spill_is_unknown_and_observed_history_reopens(tmp_path):
     reopened = SurveyCoverage(path,"route","map")
     reopened.observe(np.array([6.2,0]),np.array([[5.0,0]]),(6,0))
     assert reopened.permits(points).tolist() == [True,True,False,True]
+
+
+
+def test_reobserving_from_opposite_edge_keeps_both_views(tmp_path):
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    path = str(tmp_path/"two_views.sqlite")
+    coverage = SurveyCoverage(path,"route","map")
+    for bx,end in ((-4.997,.002),(5.02,.021)):
+        coverage.observe(np.array([bx,.025]),np.array([[end,.025]]),(bx,.025))
+    coverage.save()
+    reopened = SurveyCoverage(path,"route","map")
+    assert reopened.permits(np.array([[.001,.025],[.023,.025]])).all()

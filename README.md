@@ -41,6 +41,7 @@ The destination must register the observation message type.
 `ros2 run uran_ros2_adapter map_observations` publishes mapped poses, base-frame
 scans and depth rays from standard ROS topics. Its ROS parameters select frames,
 topics and the destination. An external SLAM system supplies a map ID and TF.
+For a SLAM system that publishes a stamped body pose, set `pose_topic` to pair it with local odometry.
 Products that manage SLAM sessions or use vendor measurements can supply a
 `slam_adapter` or `sensor_adapter` Python factory as `module:callable`.
 

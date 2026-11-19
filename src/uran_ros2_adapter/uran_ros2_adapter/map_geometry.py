@@ -61,13 +61,17 @@ def matrix(transform):
     return result
 
 
-def odometry_transform(msg):
+def stamped_pose(header,child,pose):
     t = TransformStamped()
-    t.header,t.child_frame_id = msg.header,msg.child_frame_id
-    p = msg.pose.pose
-    t.transform.translation.x,t.transform.translation.y,t.transform.translation.z = p.position.x,p.position.y,p.position.z
-    t.transform.rotation = p.orientation
+    t.header,t.child_frame_id = header,child
+    p = pose.position
+    t.transform.translation.x,t.transform.translation.y,t.transform.translation.z = p.x,p.y,p.z
+    t.transform.rotation = pose.orientation
     return t
+
+
+def odometry_transform(msg):
+    return stamped_pose(msg.header,msg.child_frame_id,msg.pose.pose)
 
 
 MAPPING_RADIUS_M = 5.0
@@ -93,6 +97,9 @@ def fuse_ranges(scan, laser_in_odom, body_xy, supplements):
     unit = np.column_stack((np.cos(angles),np.sin(angles),np.zeros(len(angles))))
     world_unit = unit @ laser_in_odom[:3,:3].T
     valid = np.isfinite(ranges) & (ranges > 0) & (ranges >= scan.range_min) & (ranges <= scan.range_max)
+    indices = np.flatnonzero(valid)
+    endpoints = laser_in_odom[:3,3] + ranges[indices,None]*world_unit[indices]
+    valid[indices] = within_survey(endpoints,body_xy)
     hits = np.full(len(ranges),np.nan)
     source = np.zeros(len(ranges),dtype=np.uint8)
     hits[valid],source[valid] = ranges[valid],1
@@ -114,6 +121,7 @@ def fuse_ranges(scan, laser_in_odom, body_xy, supplements):
         take = ~valid & np.isfinite(supported) & (supported < np.where(np.isfinite(hits),hits,np.inf))
         hits[take],source[take] = supported[take],kind
     # Check the actual emitted beam direction, including the laser mount and body tilt.
+    hits = hits.astype(np.float32).astype(float)
     world = laser_in_odom[:3,3] + hits[:,None]*world_unit
     outside = ~within_survey(world,body_xy)
     hits[outside],source[outside] = np.nan,0
