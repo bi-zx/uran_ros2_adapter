@@ -158,18 +158,17 @@ class FusedScan(Node):
             return
         supplements = []
         duration_ns = abs(scan.time_increment)*(len(scan.ranges)-1)*1e9
-        ray_step_ns = scan.time_increment*1e9 if self.cfg["require_near_lidar_support"] else 0
+        ray_step_ns = scan.time_increment*1e9
         middle = stamp.nanoseconds + scan.time_increment*(len(scan.ranges)-1)*.5e9
         for name,frames in self.layers.items():
             t,msg = min(frames,key=lambda row:abs(row[0].nanoseconds-middle))
-            per_ray = bool(ray_step_ns) and name=="image"
-            time_limit = tolerance*1e9 + (duration_ns/2 if per_ray else -duration_ns/2)
+            time_limit = tolerance*1e9 + duration_ns/2
             if abs(t.nanoseconds-middle) > time_limit:
                 continue
             try:
                 layer = self.samples(name,msg,t,laser)
                 if layer is not None:
-                    if per_ray:
+                    if ray_step_ns:
                         layer = (layer[0],synchronized_scan_points(scan,layer[1],t.nanoseconds-stamp.nanoseconds,tolerance*1e9))
                     supplements.append(layer)
             except (TransformException,ValueError) as exc:
