@@ -28,7 +28,7 @@ class MapObservations(Node):
                     "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"",
                     "scan_topic":"scan","depth_topic":"","depth_origin_frame":"","gps_topic":"",
                     "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,
-                    "surface_topic":"survey_surfaces","surface_max_age_s":2.0,"sensor_adapter":"","slam_adapter":""}
+                    "terrain_max_age_s":0.30,"surface_topic":"survey_surfaces","surface_max_age_s":2.0,"sensor_adapter":"","slam_adapter":""}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
         if not self.cfg["device_id"] or not self.cfg["component_id"]:
             raise ValueError("provide the target device_id and component_id")
@@ -66,7 +66,7 @@ class MapObservations(Node):
             self.create_subscription(Odometry,self.cfg["odom_topic"],self.on_odom,qos_profile_sensor_data)
         elif self.cfg["reference_mode"] == "local" and not self.slam:
             raise ValueError("a local map requires an odometry topic")
-        self.create_subscription(LaserScan,self.cfg["scan_topic"],lambda m:self.queue("scan",m,m.header.stamp),qos_profile_sensor_data)
+        self.create_subscription(LaserScan,self.cfg["scan_topic"],self.on_scan,qos_profile_sensor_data)
         if self.cfg["depth_topic"]:
             self.create_subscription(PointCloud2,self.cfg["depth_topic"],lambda m:self.queue("depth",m,m.header.stamp),qos_profile_sensor_data)
         if self.cfg["depth_image_topic"]:
@@ -100,6 +100,17 @@ class MapObservations(Node):
         if self.slam and self.slam.stage != "ready":
             return
         self.pending.setdefault(name,deque(maxlen=8)).append((Time.from_msg(stamp),msg))
+
+    def on_scan(self,msg):
+        if not self.out.get_subscription_count() or self.slam and self.slam.stage != "ready":
+            return
+        stamp = Time.from_msg(msg.header.stamp)
+        if abs(self.get_clock().now().nanoseconds-stamp.nanoseconds) > 0.30e9:
+            return
+        try:
+            self.scan(msg,stamp)
+        except TransformException as exc:
+            self.warn("scan",str(exc))
 
     def on_camera_info(self,msg):
         self.camera_info = msg
@@ -263,8 +274,11 @@ class MapObservations(Node):
             if self.cfg["odom_topic"]:
                 result = self.odometry_corrected_pose()
                 if result is None:
-                    return
-                stamp,rot,xy = result
+                    if self.anchor is None or self.get_clock().now().nanoseconds-self.anchor_stamp > self.cfg["slam_timeout_s"]*1e9:
+                        return
+                    stamp = self.last_pose
+                else:
+                    stamp,rot,xy = result
             else:
                 tf = self.map_poses.lookup_transform(frame,self.cfg["body_frame"],Time())
                 stamp = Time.from_msg(tf.header.stamp).nanoseconds
@@ -281,26 +295,20 @@ class MapObservations(Node):
         now = self.get_clock().now().nanoseconds
         depth_processed = False
         for name,pending in self.pending.items():
-            if name == "scan" and not publish_task:
-                pending.clear()
-                continue
-            if name != "scan" and not collect_depth:
+            if not collect_depth:
                 continue
             for stamp,msg in reversed(pending):
                 age = (now-stamp.nanoseconds)*1e-9
-                task_fresh = publish_task and abs(age)<=0.3
-                map_fresh = name!="scan" and publish_surface and 0<=age<=self.cfg["surface_max_age_s"]
+                task_fresh = publish_task and 0<=age<=self.cfg["terrain_max_age_s"]
+                map_fresh = publish_surface and 0<=age<=self.cfg["surface_max_age_s"]
                 if not (task_fresh or map_fresh):
                     self.warn(name+"-stamp","{} acquisition stamp is unavailable or stale".format(name))
                     break
-                if name != "scan" and self.cfg["odom_topic"] and stamp.nanoseconds > self.odom_stamp:
+                if self.cfg["odom_topic"] and stamp.nanoseconds > self.odom_stamp:
                     continue
                 try:
-                    if name == "scan":
-                        self.scan(msg,stamp)
-                    else:
-                        self.depth(name,msg,stamp,task_fresh,publish_surface)
-                        depth_processed = True
+                    self.depth(name,msg,stamp,task_fresh,publish_surface)
+                    depth_processed = True
                 except TransformException as exc:
                     self.warn(name,str(exc))
                     continue
