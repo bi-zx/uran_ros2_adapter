@@ -318,7 +318,7 @@ def test_denoise_uses_independent_crossings_and_protects_thin_obstacles(tmp_path
     for stamp in (10,10,10):
         cover.observe(ray,ends,ray,stamp)
     first,_ = cover.overlay(grid,np.zeros(2),np.eye(2),.05)
-    assert first[0,3] == 100 and first[0,7] == -1
+    assert first[0,3] == 0 and first[0,7] == -1
     for stamp in (20,30):
         cover.observe(ray,ends,ray,stamp)
     # A single returning cell on a thin pole and a two-frame depth drop stay black.
@@ -327,6 +327,85 @@ def test_denoise_uses_independent_crossings_and_protects_thin_obstacles(tmp_path
     cover.save()
     cover = SurveyCoverage(path,"room","map")
     out,_ = cover.overlay(grid,np.zeros(2),np.eye(2),.05)
-    assert out[0,3] == -1 and out[0,7] == 100 and out[4,3] == 100
-    assert (out[2,2:8]==100).all() and (out[saved<0] == -1).all()
+    assert out[0,3] == 0 and out[0,7] == 100 and out[4,3] == 100
+    assert (out[2,2:8]==100).all() and (out[5,:] == -1).all()
     assert np.array_equal(grid,saved)
+
+
+def test_direct_crossing_clears_old_black_and_reobserved_board_returns(tmp_path):
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    path = str(tmp_path/"room.sqlite")
+    survey = SurveyCoverage(path,"room","map")
+    ray = np.array([.025,.025])
+    old = np.full((1,10),-1,np.int8)
+    old[0,2:5] = 100
+    target = 3
+    board = np.array([[.175,.025]])
+    beyond = np.array([[.425,.025]])
+    def colour():
+        grid,_ = survey.overlay(old,np.zeros(2),np.eye(2),.05)
+        return grid[0,target]
+    survey.observe(ray,beyond,ray,10)
+    assert colour()==0
+    survey.observe(ray,board,ray,20)
+    survey.observe(ray,board,ray,20)
+    assert colour()==0
+    survey.save()
+    survey = SurveyCoverage(path,"room","map")
+    survey.observe(ray,board,ray,30)
+    survey.observe(ray,beyond,ray,15)
+    assert colour()==100
+    survey.observe(ray,beyond,ray,40)
+    assert colour()==0
+    assert old[0,target]==100
+
+
+def test_conflicting_depth_heights_do_not_confirm_a_static_obstacle(tmp_path):
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    path = str(tmp_path/"survey.sqlite")
+    survey = SurveyCoverage(path,"room","map")
+    def depth(z,stamp):
+        survey.observe_surfaces([dict(body_xy=[0,0],points=[[.175,.025,z]])],np.zeros(3),.045,.45,stamp)
+    def colour():
+        out,_ = survey.overlay(np.full((1,4),-1,np.int8),np.zeros(2),np.eye(2),.05)
+        return out[0,3]
+    depth(.12,100)
+    survey.save()
+    survey = SurveyCoverage(path,"room","map")
+    depth(-.18,200)
+    assert colour()==-1
+    depth(-.17,300)
+    assert colour()==100
+
+
+def test_old_scan_counts_and_unknown_time_order_wait_for_new_measurements(tmp_path):
+    import sqlite3
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    path = str(tmp_path/"room.sqlite")
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE scan_evidence (x INTEGER,y INTEGER,hits INTEGER,crossings INTEGER,stamp INTEGER,PRIMARY KEY(x,y))")
+        db.execute("INSERT INTO scan_evidence VALUES (3,0,2,3,10)")
+    survey = SurveyCoverage(path,"room","map")
+    ray = np.array([.025,.025])
+    ends = np.array([[.175,.025]])
+    grid = np.full((1,8),-1,np.int8)
+    def colour():
+        return survey.overlay(grid,np.zeros(2),np.eye(2),.05)[0][0,3]
+    assert colour()==-1
+    survey.observe(ray,ends,ray,20)
+    assert colour()==-1
+    survey.observe(ray,ends,ray,30)
+    assert colour()==100
+    survey.observe(ray,np.array([[6.,.025]]),ray,40)
+    assert colour()==100
+
+def test_lone_depth_return_requires_same_height_and_timely_corroboration():
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    survey = SurveyCoverage("","room","map")
+    group = dict(body_xy=[0.,0.],points=[[.175,.025,.12]])
+    grid = np.full((1,4),-1,np.int8)
+    for stamp in (100,4_000_000_100):
+        survey.observe_surfaces([group],np.zeros(3),.045,.45,stamp)
+    assert survey.overlay(grid,np.zeros(2),np.eye(2),.05)[0][0,3]==-1
+    survey.observe_surfaces([group],np.zeros(3),.045,.45,8_000_000_100)
+    assert survey.overlay(grid,np.zeros(2),np.eye(2),.05)[0][0,3]==100

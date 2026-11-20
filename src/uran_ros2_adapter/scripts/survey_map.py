@@ -16,7 +16,7 @@ from sensor_msgs.msg import LaserScan
 from uran_ros2_msgs.msg import ContractEnvelope
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from uran_ros2_adapter.map_geometry import matrix, stamped_pose, within_survey
+from uran_ros2_adapter.map_geometry import matrix, stamped_pose
 from uran_ros2_adapter.survey_coverage import SurveyCoverage
 
 
@@ -25,13 +25,14 @@ class SurveyMap(Node):
         super().__init__("survey_map")
         defaults = {"scan_topic":"scan_fused","grid_topic":"map","output_topic":"survey_map",
                     "body_frame":"base_link","map_frame":"map","pose_topic":"","map_id":"","coverage_file":"",
-                    "surface_topic":"survey_surfaces","ground_band_m":0.045,"body_height_m":0.45}
+                    "surface_topic":"survey_surfaces","ground_band_m":0.045,"body_height_m":0.45,"surface_confirmation_s":1.0}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
         if not self.cfg["map_id"]:
             raise ValueError("provide the SLAM map_id")
         if self.resolve_topic_name(self.cfg["grid_topic"]) == self.resolve_topic_name(self.cfg["output_topic"]):
             raise ValueError("provide distinct input and output grid topics")
-        self.coverage = SurveyCoverage(self.cfg["coverage_file"],self.cfg["map_id"],self.cfg["map_frame"])
+        self.coverage = SurveyCoverage(self.cfg["coverage_file"],self.cfg["map_id"],self.cfg["map_frame"],
+                                       surface_confirmation_s=self.cfg["surface_confirmation_s"])
         self.tf = Buffer()
         self.listener = TransformListener(self.tf,self)
         self.poses = Buffer() if self.cfg["pose_topic"] else self.tf
@@ -105,7 +106,6 @@ class SurveyMap(Node):
             angles = scan.angle_min+i*scan.angle_increment
             xy = np.column_stack((ranges[i]*np.cos(angles),ranges[i]*np.sin(angles)))
             ends = xy @ sensor[:2,:2].T + sensor[:2,3]
-            ends = ends[within_survey(ends,pose[:2,3])]
             self.coverage.observe(sensor[:2,3],ends,pose[:2,3],stamp.nanoseconds)
             self.map_stamp = max(self.map_stamp,stamp.nanoseconds)
             self.redraw = True
