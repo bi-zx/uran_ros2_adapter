@@ -125,6 +125,22 @@ def odometry_transform(msg):
 MAPPING_RADIUS_M = 5.0
 
 
+def survey_rays(points, origin, body_xy):
+    """Measured endpoints and free-only segments ending on the body-centred survey circle."""
+    inside = within_survey(points,body_xy)
+    delta = points[~inside]-origin
+    if not len(delta):
+        return points[inside],delta
+    offset = np.asarray(origin)[:2]-body_xy
+    a = np.sum(delta[:,:2]**2,axis=1)
+    b = delta[:,:2] @ offset
+    c = np.dot(offset,offset)-MAPPING_RADIUS_M**2
+    if c >= 0:
+        return points[inside],delta[:0]
+    t = (-b+np.sqrt(b*b-a*c))/a
+    return points[inside],origin+delta*t[:,None]
+
+
 def within_survey(points, body_xy):
     radius = np.hypot(points[:,0]-body_xy[0], points[:,1]-body_xy[1])
     return np.less_equal(radius,MAPPING_RADIUS_M,where=np.isfinite(radius),out=np.zeros(len(radius),dtype=bool))

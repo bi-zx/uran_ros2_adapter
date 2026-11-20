@@ -12,7 +12,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from uran_ros2_adapter.depth_images import subscribe_depth
 from rclpy.time import Time
-from uran_ros2_adapter.map_geometry import rigid, scan_in_body, matrix, stamped_pose, odometry_transform, body_in_odom, grounded_pose, within_survey, cloud_points, rectified_depth_points
+from uran_ros2_adapter.map_geometry import rigid, scan_in_body, matrix, stamped_pose, odometry_transform, body_in_odom, grounded_pose, survey_rays, cloud_points, rectified_depth_points
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan, PointCloud2, NavSatFix
@@ -56,10 +56,12 @@ class MapObservations(Node):
         self.anchor = None
         self.out = self.create_publisher(ContractEnvelope,"/uran/runtime/dispatch",30)
         self.surface_out = self.create_publisher(ContractEnvelope,self.cfg["surface_topic"],qos_profile_sensor_data) if self.cfg["surface_topic"] else None
+        self.base_support = None
+        self.revision_start = 0
         self.pending = {}
         self.layers = {}
         self.last_warning = {}
-        self.last_pose = self.last_depth = 0
+        self.last_pose = 0
         self.next_depth = 0.0
         self.slam = None
         if self.cfg["slam_adapter"]:
@@ -150,6 +152,10 @@ class MapObservations(Node):
         stamp = Time.from_msg(msg.header.stamp).nanoseconds
         frames = (msg.header.frame_id,msg.child_frame_id)
         if self.odom_frames != frames:
+            if self.odom_frames is not None:
+                self.revision += 1
+                self.revision_start = stamp
+                self.layers.clear()
             self.odom_history.clear()
             self.anchor,self.anchor_stamp,self.odom_stamp = None,0,0
         if stamp <= self.odom_stamp:
@@ -191,12 +197,17 @@ class MapObservations(Node):
             yaw_delta = math.atan2(new[1,0],new[0,0])-math.atan2(old[1,0],old[0,0])
             if np.linalg.norm(new[:2,3]-old[:2,3]) > 0.25 or abs(math.atan2(math.sin(yaw_delta),math.cos(yaw_delta))) > math.radians(10):
                 self.revision += 1
+                self.revision_start = stamp.nanoseconds
+                self.layers.clear()
         self.anchor,self.anchor_stamp = candidate,stamp.nanoseconds
 
     def publish_pose(self,stamp,rot,xy,odometry_fused):
-        self.send("map_pose",stamp,self.cfg["map_frame"],{"map_id":self.cfg["map_id"],"x":xy[0],"y":xy[1],
+        value = {"map_id":self.cfg["map_id"],"x":xy[0],"y":xy[1],
                   "yaw_deg":math.degrees(math.atan2(rot[1,0],rot[0,0])),"localization_revision":self.revision,
-                  "odometry_fused":odometry_fused})
+                  "odometry_fused":odometry_fused}
+        if self.base_support is not None:
+            value["support_stamp_ns"],value["support_state"] = self.base_support
+        self.send("map_pose",stamp,self.cfg["map_frame"],value)
         self.last_pose = stamp
 
     def in_map(self,source,stamp):
@@ -239,6 +250,8 @@ class MapObservations(Node):
         self.send("laser_scan",stamp.nanoseconds,self.cfg["body_frame"],scan_in_body(msg,rot,offset))
 
     def depth(self,name,msg,stamp,task_fresh,publish_surface):
+        if stamp.nanoseconds < self.revision_start:
+            return
         if name in ("depth","depth_image"):
             if name == "depth":
                 local_points = cloud_points(msg)
@@ -260,8 +273,8 @@ class MapObservations(Node):
             origin = origin @ rot.T + offset
             points = points @ rot.T + offset
         _,body = self.in_map(self.cfg["body_frame"],stamp)
-        points = points[within_survey(points,body[:2])]
-        if len(points):
+        points,free_ends = survey_rays(points,origin,body[:2])
+        if len(points) or len(free_ends):
             if self.cfg["use_odometry_ground_plane"]:
                 ground = body.copy()
                 ground[2] = 0.
@@ -273,11 +286,14 @@ class MapObservations(Node):
             else:
                 _,ground = self.in_map(self.cfg["ground_frame"],stamp)
             ground = ground.tolist()
-            group = {"origin":origin.tolist(),"body_xy":body[:2].tolist(),"points":points.tolist()}
-            if publish_surface:
+            group = {"origin":origin.tolist(),"body_xy":body[:2].tolist(),"points":points.tolist(),
+                     "timestamp_ns":stamp.nanoseconds,"ground_xyz":ground}
+            if publish_surface and len(points):
                 self.send("depth_rays",stamp.nanoseconds,self.cfg["map_frame"],
-                          {"map_id":self.cfg["map_id"],"ground_xyz":ground,"beams":[group]},self.surface_out)
+                          {"map_id":self.cfg["map_id"],"localization_revision":self.revision,"ground_xyz":ground,"beams":[group]},self.surface_out)
             if task_fresh:
+                if len(free_ends):
+                    group["free_ends"] = free_ends.tolist()
                 self.layers[name] = (stamp.nanoseconds,ground,group)
 
     def flush(self):
@@ -286,7 +302,7 @@ class MapObservations(Node):
             if self.slam.stage != "ready":
                 self.pending.clear()
                 self.layers.clear()
-                self.last_pose = self.last_depth = self.odom_stamp = self.anchor_stamp = 0
+                self.last_pose = self.odom_stamp = self.anchor_stamp = self.revision_start = 0
                 self.anchor = self.odom_frames = None
                 if self.cfg["pose_topic"]:
                     self.map_poses.clear()
@@ -322,12 +338,13 @@ class MapObservations(Node):
         now = self.get_clock().now().nanoseconds
         depth_processed = False
         for name,pending in self.pending.items():
-            if not collect_depth:
+            camera = name in ("depth","depth_image")
+            if not collect_depth and (camera or not publish_task):
                 continue
             for stamp,msg in reversed(pending):
                 age = (now-stamp.nanoseconds)*1e-9
                 task_fresh = publish_task and 0<=age<=self.cfg["terrain_max_age_s"]
-                map_fresh = publish_surface and 0<=age<=self.cfg["surface_max_age_s"]
+                map_fresh = publish_surface and collect_depth and 0<=age<=self.cfg["surface_max_age_s"]
                 if not (task_fresh or map_fresh):
                     self.warn(name+"-stamp","{} acquisition stamp is unavailable or stale".format(name))
                     break
@@ -335,7 +352,7 @@ class MapObservations(Node):
                     continue
                 try:
                     self.depth(name,msg,stamp,task_fresh,publish_surface)
-                    depth_processed = True
+                    depth_processed = depth_processed or camera or not publish_task
                 except TransformException as exc:
                     self.warn(name,str(exc))
                     continue
@@ -343,11 +360,14 @@ class MapObservations(Node):
                     pending.popleft()
                 break
         if self.layers:
-            latest,ground,_ = max(self.layers.values(),key=lambda layer:layer[0])
-            beams = [group for stamp,_,group in self.layers.values() if latest-stamp <= 0.12e9]
-            if latest > self.last_depth:
-                self.send("depth_rays",latest,frame,{"map_id":self.cfg["map_id"],"ground_xyz":ground,"beams":beams})
-                self.last_depth = latest
+            layers = sorted(self.layers.values(),key=lambda layer:layer[0])
+            while layers:
+                first = layers[0][0]
+                bundle = [layer for layer in layers if layer[0]-first <= 0.12e9]
+                latest,ground,_ = bundle[-1]
+                self.send("depth_rays",latest,frame,{"map_id":self.cfg["map_id"],"localization_revision":self.revision,
+                          "ground_xyz":ground,"beams":[g for _,_,g in bundle]})
+                layers = layers[len(bundle):]
             self.layers.clear()
         if depth_processed and self.cfg["depth_rate_hz"]>0:
             self.next_depth = time.monotonic()+1.0/self.cfg["depth_rate_hz"]

@@ -85,3 +85,23 @@ def test_floor_and_step_heights_follow_support_attitude_and_laser_xy():
     ground_points = np.array([[1.,0.,0.],[1.,0.,.11],[1.,0.,-.09]])
     local = (ground_points-[0.,0.,.24]) @ support[:3,:3]
     assert np.allclose((local @ body[:3,:3].T+body[:3,3])[:,2],ground_points[:,2])
+
+
+def test_measured_rays_clip_at_body_radius_without_creating_a_return():
+    from uran_ros2_adapter.map_geometry import survey_rays
+    body=np.array([2.,-1.])
+    origin=np.array([2.3,-.9,.3])
+    endpoints=np.array([[2.5,-.8,0.],[2.,6.,.5],[8.,-2.,.6]])
+    hits,opened=survey_rays(endpoints,origin,body)
+    assert np.array_equal(hits,endpoints[:1])
+    assert np.linalg.norm(opened[:,:2]-body,axis=1)==pytest.approx([5.,5.])
+    assert np.cross(opened-origin,endpoints[1:]-origin)==pytest.approx(np.zeros((2,3)))
+
+
+def test_stamped_support_is_attached_to_the_acquisition_pose(node):
+    node.send=Mock()
+    node.base_support=(123000000,"standing")
+    node.publish_pose(124000000,np.eye(3),[0.,0.,0.],True)
+    args=node.send.call_args[0]
+    assert args[1]==124000000 and args[3]["support_stamp_ns"]==123000000
+    assert args[3]["support_state"]=="standing"
