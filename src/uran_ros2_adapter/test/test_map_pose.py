@@ -66,3 +66,22 @@ def test_expired_upstream_pose_does_not_refresh_the_task(node):
     odom(node,now,1.)
     node.flush()
     node.send.assert_not_called()
+
+
+def test_floor_and_step_heights_follow_support_attitude_and_laser_xy():
+    from uran_ros2_adapter.map_geometry import grounded_pose
+    yaw,tilt = np.radians([75.,12.])
+    c,s = np.cos(tilt),np.sin(tilt)
+    support = np.eye(4)
+    support[:3,:3] = [[c,0,s],[0,1,0],[-s,0,c]]
+    support[:3,3] = [18.,-9.,.24]
+    m = np.eye(4)
+    m[:3,:3] = [[np.cos(yaw),-np.sin(yaw),0],[np.sin(yaw),np.cos(yaw),0],[0,0,1]]
+    m[:3,3] = [2.,3.,0.]
+    body = grounded_pose(m,support)
+    assert np.allclose(body[:3,3],[2.,3.,.24])
+    assert np.isclose(np.arctan2(body[1,0],body[0,0]),yaw)
+    # A floor ray, an 11 cm step and a 9 cm drop retain their physical heights.
+    ground_points = np.array([[1.,0.,0.],[1.,0.,.11],[1.,0.,-.09]])
+    local = (ground_points-[0.,0.,.24]) @ support[:3,:3]
+    assert np.allclose((local @ body[:3,:3].T+body[:3,3])[:,2],ground_points[:,2])

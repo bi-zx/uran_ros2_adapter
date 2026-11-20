@@ -138,6 +138,16 @@ def body_in_odom(history, tf, frames, body_frame, body_alias, stamp):
     return pose
 
 
+def grounded_pose(map_pose, support_pose):
+    """Place measured body height and gravity attitude at the planar SLAM position and heading."""
+    heading = math.atan2(map_pose[1,0],map_pose[0,0])-math.atan2(support_pose[1,0],support_pose[0,0])
+    c,s = math.cos(heading),math.sin(heading)
+    result = support_pose.copy()
+    result[:2,:3] = np.array([[c,-s],[s,c]]) @ support_pose[:2,:3]
+    result[:2,3] = map_pose[:2,3]
+    return result
+
+
 def scan_bins(scan, points):
     middle = scan.angle_min+(len(scan.ranges)-1)*scan.angle_increment/2
     angles = np.arctan2(points[:,1],points[:,0])

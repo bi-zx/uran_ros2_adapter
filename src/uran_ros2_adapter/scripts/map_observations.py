@@ -12,7 +12,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from uran_ros2_adapter.depth_images import subscribe_depth
 from rclpy.time import Time
-from uran_ros2_adapter.map_geometry import rigid, scan_in_body, matrix, stamped_pose, odometry_transform, body_in_odom, within_survey, cloud_points, rectified_depth_points
+from uran_ros2_adapter.map_geometry import rigid, scan_in_body, matrix, stamped_pose, odometry_transform, body_in_odom, grounded_pose, within_survey, cloud_points, rectified_depth_points
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan, PointCloud2, NavSatFix
@@ -25,7 +25,7 @@ class MapObservations(Node):
         super().__init__("map_observations")
         defaults = {"map_id":"","map_frame":"map","body_frame":"base_link","ground_frame":"base_footprint",
                     "device_id":"","component_id":"","instance_id":"","source_component":"sensors",
-                    "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"", "pose_includes_odometry":False,
+                    "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"", "pose_includes_odometry":False,"use_odometry_ground_plane":False,
                     "scan_topic":"scan","depth_topic":"","depth_origin_frame":"","gps_topic":"",
                     "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,
                     "terrain_max_age_s":0.30,"surface_topic":"survey_surfaces","surface_max_age_s":2.0,"sensor_adapter":"","slam_adapter":""}
@@ -42,6 +42,8 @@ class MapObservations(Node):
             raise ValueError("provide a depth cloud, rectified depth image or a sensor adapter")
         if self.cfg["pose_includes_odometry"] and not self.cfg["pose_topic"]:
             raise ValueError("pose_includes_odometry requires a stamped map pose topic")
+        if self.cfg["use_odometry_ground_plane"] and not (self.cfg["pose_topic"] and self.cfg["odom_topic"]):
+            raise ValueError("a planar map with support height needs pose_topic and odom_topic")
         self.tf = Buffer()
         self.listener = TransformListener(self.tf,self)
         self.map_poses = self.tf
@@ -198,6 +200,12 @@ class MapObservations(Node):
         self.last_pose = stamp
 
     def in_map(self,source,stamp):
+        if self.cfg["use_odometry_ground_plane"]:
+            planar = self.map_poses.lookup_transform(self.cfg["map_frame"],self.cfg["body_frame"],stamp)
+            pose = grounded_pose(matrix(planar.transform),self.body_in_odom(stamp))
+            if source != self.cfg["body_frame"]:
+                pose = pose @ matrix(self.tf.lookup_transform(self.cfg["body_frame"],source,stamp).transform)
+            return pose[:3,:3],pose[:3,3]
         if not self.cfg["odom_topic"]:
             if self.cfg["pose_topic"]:
                 pose = matrix(self.map_poses.lookup_transform(self.cfg["map_frame"],self.cfg["body_frame"],stamp).transform)
@@ -254,7 +262,10 @@ class MapObservations(Node):
         _,body = self.in_map(self.cfg["body_frame"],stamp)
         points = points[within_survey(points,body[:2])]
         if len(points):
-            if self.odom_frames and self.cfg["ground_frame"] == self.odom_frames[0]:
+            if self.cfg["use_odometry_ground_plane"]:
+                ground = body.copy()
+                ground[2] = 0.
+            elif self.odom_frames and self.cfg["ground_frame"] == self.odom_frames[0]:
                 # With a level floor at odometry Z=0, project this body position onto that plane.
                 ground_odom = self.body_in_odom(stamp)[:3,3].copy()
                 ground_odom[2] = 0.0

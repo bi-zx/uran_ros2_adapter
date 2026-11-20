@@ -56,6 +56,8 @@ For a level floor coinciding with odometry Z=0, setting `ground_frame` to the
 odometry parent projects the robot position onto that plane. Use a measured
 local ground frame on terrain with changing elevation.
 
+For a planar laser map, set `use_odometry_ground_plane:=true` in `map_observations` when the odometry source supplies body height above the support plane and gravity-aligned roll and pitch. Set `pose_topic` to the measured planar body pose. In `fused_scan`, select that same pose with `planar_pose_topic` and set `ground_frame` to the support odometry parent. At each exposure both nodes take horizontal position and heading from laser SLAM, and height and tilt from the support odometry.
+
 Set `depth_rate_hz` to the rate the onboard terrain consumer can process.
 The bridge uses the latest synchronized depth for each publication. Zero uses
 the input rate. The CyberDog2 board was tested at 2 Hz for depth while its

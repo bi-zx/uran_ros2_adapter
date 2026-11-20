@@ -10,11 +10,12 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from uran_ros2_adapter.depth_images import subscribe_depth
 from rclpy.time import Time
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from uran_ros2_adapter.map_geometry import (NearSurfaceHistory, body_in_odom, cloud_points, fuse_ranges, matching_depth_views, matrix,
+from uran_ros2_adapter.map_geometry import (NearSurfaceHistory, body_in_odom, grounded_pose, stamped_pose, cloud_points, fuse_ranges, matching_depth_views, matrix,
                                            near_lidar_actions, odometry_transform, rectified_depth_model,
                                            rectified_depth_points, rectified_intrinsics, synchronized_scan_points, take_ready_scan, within_survey)
 
@@ -23,7 +24,7 @@ class FusedScan(Node):
     def __init__(self, depth_readers=None):
         super().__init__("fused_scan")
         defaults = {"scan_topic":"scan", "output_topic":"scan_fused", "body_frame":"base_link", "odom_topic":"odom",
-                    "odom_body_alias":"", "ground_frame":"base_footprint", "depth_image_topic":"",
+                    "odom_body_alias":"", "planar_pose_topic":"", "ground_frame":"base_footprint", "depth_image_topic":"",
                     "depth_camera_info_topic":"", "depth_topic":"", "sensor_adapter":"", "pair_tolerance_s":0.060,
                     "depth_check_range_m":0.0, "depth_disagreement_m":0.25, "require_near_lidar_support":False,
                     "blind_surface_range_m":0.0, "unknown_range":"nan", "max_wait_s":0.45, "min_ground_height_m":0.08, "depth_pixel_stride":2}
@@ -48,6 +49,10 @@ class FusedScan(Node):
         self.listener = TransformListener(self.tf,self)
         self.frames,self.info = None,None
         self.odom_stamp = 0
+        self.planar = Buffer() if self.cfg["planar_pose_topic"] else None
+        self.map_frame,self.planar_stamp = "",0
+        if self.planar is not None:
+            self.create_subscription(PoseStamped,self.cfg["planar_pose_topic"],self.on_planar_pose,qos_profile_sensor_data)
         self.pending,self.layers = deque(maxlen=16),{}
         self.last_warning = {}
         self.pub = self.create_publisher(LaserScan,self.cfg["output_topic"],5)
@@ -92,8 +97,19 @@ class FusedScan(Node):
     def queue(self,name,msg,stamp):
         self.layers.setdefault(name,deque(maxlen=12)).append((Time.from_msg(stamp),msg))
 
+    def on_planar_pose(self,msg):
+        if self.map_frame != msg.header.frame_id:
+            self.planar.clear()
+            self.map_frame = msg.header.frame_id
+        self.planar.set_transform(stamped_pose(msg.header,self.cfg["body_frame"],msg.pose),"slam")
+        self.planar_stamp = Time.from_msg(msg.header.stamp).nanoseconds
+
     def pose(self,stamp):
-        return body_in_odom(self.odom,self.tf,self.frames,self.cfg["body_frame"],self.cfg["odom_body_alias"],stamp)
+        body = body_in_odom(self.odom,self.tf,self.frames,self.cfg["body_frame"],self.cfg["odom_body_alias"],stamp)
+        if self.planar is None:
+            return body
+        planar = self.planar.lookup_transform(self.map_frame,self.cfg["body_frame"],stamp)
+        return grounded_pose(matrix(planar.transform),body)
 
     def mount(self,frame,stamp):
         return matrix(self.tf.lookup_transform(self.cfg["body_frame"],frame,stamp).transform)
@@ -141,12 +157,13 @@ class FusedScan(Node):
         if not self.frames or not self.pending:
             return
         tolerance = self.cfg["pair_tolerance_s"]
-        depth_ns = self.odom_stamp
+        pose_ns = min(self.odom_stamp,self.planar_stamp) if self.planar is not None else self.odom_stamp
+        depth_ns = pose_ns
         for key,topic in (("image","depth_image_topic"),("cloud","depth_topic")):
             if self.cfg[topic]:
                 frames = self.layers.get(key)
                 depth_ns = min(depth_ns,frames[-1][0].nanoseconds if frames else 0)
-        scan = take_ready_scan(self.pending,time.monotonic(),tolerance,self.cfg["max_wait_s"],self.odom_stamp,depth_ns)
+        scan = take_ready_scan(self.pending,time.monotonic(),tolerance,self.cfg["max_wait_s"],pose_ns,depth_ns)
         if scan is None:
             return
         stamp = Time.from_msg(scan.header.stamp)
