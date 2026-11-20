@@ -3,6 +3,7 @@ import math
 import sqlite3
 
 import numpy as np
+from scipy.ndimage import label
 
 from .map_geometry import MAPPING_RADIUS_M, within_survey
 
@@ -50,6 +51,9 @@ class SurveyCoverage:
         self.db.execute("CREATE TABLE IF NOT EXISTS edge_views (x INTEGER,y INTEGER,vx INTEGER,vy INTEGER,bx REAL,by REAL,PRIMARY KEY(x,y,vx,vy))")
         self.db.execute("CREATE TABLE IF NOT EXISTS surfaces (x INTEGER,y INTEGER,score INTEGER,stamp INTEGER,vote INTEGER,bx REAL,by REAL,PRIMARY KEY(x,y))")
         self.surfaces = {(x,y):(score,stamp,vote,bx,by) for x,y,score,stamp,vote,bx,by in self.db.execute("SELECT * FROM surfaces")}
+        self.db.execute("CREATE TABLE IF NOT EXISTS scan_evidence (x INTEGER,y INTEGER,hits INTEGER,crossings INTEGER,stamp INTEGER,PRIMARY KEY(x,y))")
+        self.scan_evidence = {(x,y):(hits,crossings,stamp) for x,y,hits,crossings,stamp in self.db.execute("SELECT * FROM scan_evidence")}
+        self.changed_scans = {}
         self.changed_surfaces = set()
         self.db.commit()
         self.origins = {(x,y):(bx,by) for x,y,bx,by in self.db.execute("SELECT * FROM rays")}
@@ -59,7 +63,7 @@ class SurveyCoverage:
             self.edge_views.setdefault((x,y),{})[(vx,vy)] = (bx,by)
         self.new_views = []
 
-    def observe(self,origin,ends,body):
+    def observe(self,origin,ends,body,stamp=None):
         if not len(ends):
             return
         steps = np.ceil(np.linalg.norm(ends-origin,axis=1)/(self.tile*0.5)).astype(int)
@@ -69,8 +73,15 @@ class SurveyCoverage:
         xy = origin+(ends[beams]-origin)*(samples/steps[beams])[:,None]
         tiles = np.unique(np.floor(xy/self.tile).astype(int),axis=0)
         bx,by = float(body[0]),float(body[1])
+        hits = {tuple(t) for t in np.floor(ends/self.tile).astype(int).tolist()} if stamp is not None else set()
         for x,y in tiles.tolist():
             key = (x,y)
+            if stamp is not None:
+                count,passed,previous = self.scan_evidence.get(key,(0,0,-1))
+                hit = key in hits
+                if stamp>previous and ((hit and count<2) or (not hit and passed<3)):
+                    record = (count+int(hit),passed+int(not hit),stamp)
+                    self.changed_scans[key] = self.scan_evidence[key] = record
             old = self.origins.get(key)
             if old:
                 cx,cy = (x+.5)*self.tile,(y+.5)*self.tile
@@ -124,8 +135,45 @@ class SurveyCoverage:
                     self.surfaces[key] = (score,stamp,vote,float(body[0]),float(body[1]))
                     self.changed_surfaces.add(key)
 
+    def _filter_scan_speckles(self,raster,origin,rotation,resolution):
+        """Show isolated single-scan returns as unknown until corroborated."""
+        if not self.scan_evidence:
+            return raster
+        components,n = label(raster>=65,structure=np.ones((3,3),np.uint8))
+        if not n:
+            return raster
+        sizes = np.bincount(components.ravel(),minlength=n+1)
+        sizes[0] = 4
+        rows,cols = np.where(sizes[components]<=3)
+        if not len(rows):
+            return raster
+        # Protect a small component as a whole, including returns on cell boundaries.
+        local_xy = (np.column_stack((cols,rows))+.5)*resolution
+        centers = local_xy @ rotation.T + origin
+        tiles = np.floor(centers/self.tile).astype(int)
+        votes = np.asarray([self.scan_evidence.get(tuple(t),(0,0,0))[:2] for t in tiles.tolist()])
+        uncertain = (votes[:,0]==1) | (votes[:,1]>=3)
+        protected = set(components[rows[~uncertain],cols[~uncertain]].tolist())
+        reach = int(math.ceil(resolution/(math.sqrt(2)*self.tile)))
+        for dx in range(-reach,reach+1):
+            for dy in range(-reach,reach+1):
+                nearby = tiles+(dx,dy)
+                hit_centers = (nearby+.5)*self.tile
+                delta = (hit_centers-centers) @ rotation
+                # Tile squares may rotate relative to the occupancy grid.
+                overlap = np.all(abs(delta) < resolution/2+self.tile*.5*np.sum(abs(rotation),axis=0)-1e-10,axis=1)
+                for index in np.flatnonzero(overlap):
+                    if self.scan_evidence.get(tuple(nearby[index]),(0,0,0))[0]>=2:
+                        protected.add(components[rows[index],cols[index]])
+        remove = ~np.isin(components[rows,cols],list(protected))
+        if remove.any():
+            raster = raster.copy()
+            raster[rows[remove],cols[remove]] = -1
+        return raster
+
     def overlay(self,raster,origin,rotation,resolution):
         """Add measured surfaces, including those outside the planar raster's bounds."""
+        raster = self._filter_scan_speckles(raster,origin,rotation,resolution)
         stable = [(x,y,score,bx,by) for (x,y),(score,_,_,bx,by) in self.surfaces.items() if abs(score)>=2]
         if not stable:
             return raster,origin
@@ -162,13 +210,16 @@ class SurveyCoverage:
         return result, origin + (low*resolution) @ rotation.T
 
     def save(self):
-        if self.dirty or self.new_views or self.changed_surfaces:
+        if self.dirty or self.new_views or self.changed_surfaces or self.changed_scans:
             with self.db:
+                self.db.executemany("INSERT OR REPLACE INTO scan_evidence VALUES (?,?,?,?,?)",
+                                    (cell+value for cell,value in self.changed_scans.items()))
                 self.db.executemany("INSERT OR REPLACE INTO rays VALUES (?,?,?,?)",
                                     ((x,y,bx,by) for (x,y),(bx,by) in self.dirty.items()))
                 self.db.executemany("INSERT OR IGNORE INTO edge_views VALUES (?,?,?,?,?,?)",self.new_views)
                 self.db.executemany("INSERT OR REPLACE INTO surfaces VALUES (?,?,?,?,?,?,?)",
                                     ((x,y)+self.surfaces[(x,y)] for x,y in self.changed_surfaces))
+            self.changed_scans.clear()
             self.changed_surfaces.clear()
             self.dirty.clear()
             self.new_views.clear()

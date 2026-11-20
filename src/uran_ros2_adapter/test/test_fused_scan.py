@@ -302,3 +302,31 @@ def test_delayed_scan_processing_selects_latest_supported_exposure():
     assert take_ready_scan(pending,10.01,0.05,0.45,500*ms,460*ms) == "waiting_depth"
     assert take_ready_scan(pending,10.6,0.05,0.45,500*ms,460*ms) is None
     assert not pending
+
+
+def test_denoise_uses_independent_crossings_and_protects_thin_obstacles(tmp_path):
+    from uran_ros2_adapter.survey_coverage import SurveyCoverage
+    path = str(tmp_path/"room.sqlite")
+    cover = SurveyCoverage(path,"room","map")
+    grid = np.full((6,18),-1,np.int8)
+    grid[0,[3,7]] = 100
+    grid[2,2:8] = 100
+    grid[4,3] = 100
+    saved = grid.copy()
+    ray = np.array([.025,.025])
+    ends = np.array([[.875,.025],[.375,.025],[.875,.125],[.875,.225]])
+    for stamp in (10,10,10):
+        cover.observe(ray,ends,ray,stamp)
+    first,_ = cover.overlay(grid,np.zeros(2),np.eye(2),.05)
+    assert first[0,3] == 100 and first[0,7] == -1
+    for stamp in (20,30):
+        cover.observe(ray,ends,ray,stamp)
+    # A single returning cell on a thin pole and a two-frame depth drop stay black.
+    for stamp in (20,30):
+        cover.observe_surfaces([dict(body_xy=ray,points=[[.175,.225,-.11]])],np.zeros(3),.045,.45,stamp)
+    cover.save()
+    cover = SurveyCoverage(path,"room","map")
+    out,_ = cover.overlay(grid,np.zeros(2),np.eye(2),.05)
+    assert out[0,3] == -1 and out[0,7] == 100 and out[4,3] == 100
+    assert (out[2,2:8]==100).all() and (out[saved<0] == -1).all()
+    assert np.array_equal(grid,saved)

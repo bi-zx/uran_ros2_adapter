@@ -106,7 +106,7 @@ class SurveyMap(Node):
             xy = np.column_stack((ranges[i]*np.cos(angles),ranges[i]*np.sin(angles)))
             ends = xy @ sensor[:2,:2].T + sensor[:2,3]
             ends = ends[within_survey(ends,pose[:2,3])]
-            self.coverage.observe(sensor[:2,3],ends,pose[:2,3])
+            self.coverage.observe(sensor[:2,3],ends,pose[:2,3],stamp.nanoseconds)
             self.map_stamp = max(self.map_stamp,stamp.nanoseconds)
             self.redraw = True
 
