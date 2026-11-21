@@ -19,7 +19,8 @@ public:
     if (capacity <= 0) throw std::invalid_argument("max_pending_scans must be positive");
     capacity_ = static_cast<std::size_t>(capacity);
     output_ = create_publisher<Scan>("scan_synchronized", rclcpp::SensorDataQoS());
-    imu_ = create_subscription<Imu>("imu", rclcpp::SensorDataQoS().keep_last(400),
+    // This subscriber only tracks the latest acquisition time. The mapper integrates its own IMU stream.
+    imu_ = create_subscription<Imu>("imu", rclcpp::SensorDataQoS().keep_last(1),
       [this](Imu::ConstSharedPtr msg) {
         const auto stamp = rclcpp::Time(msg->header.stamp).nanoseconds();
         if (!first_imu_) first_imu_ = stamp;
