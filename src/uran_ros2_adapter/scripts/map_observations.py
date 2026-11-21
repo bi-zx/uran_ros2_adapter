@@ -12,7 +12,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from uran_ros2_adapter.depth_images import subscribe_depth
 from rclpy.time import Time
-from uran_ros2_adapter.map_geometry import rigid, scan_in_body, matrix, stamped_pose, odometry_transform, body_in_odom, grounded_pose, survey_rays, cloud_points, rectified_depth_points
+from uran_ros2_adapter.observation_packets import observation_packet, publish_scan
+from uran_ros2_adapter.map_geometry import rigid, matrix, stamped_pose, odometry_transform, body_in_odom, grounded_pose, survey_rays, cloud_points, rectified_depth_points
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan, PointCloud2, NavSatFix
@@ -26,7 +27,7 @@ class MapObservations(Node):
         defaults = {"map_id":"","map_frame":"map","body_frame":"base_link","ground_frame":"base_footprint",
                     "device_id":"","component_id":"","instance_id":"","source_component":"sensors",
                     "reference_mode":"local","odom_topic":"odom","odom_body_alias":"","slam_timeout_s":2.0, "pose_topic":"", "pose_includes_odometry":False,"use_odometry_ground_plane":False,
-                    "scan_topic":"scan","depth_topic":"","depth_origin_frame":"","gps_topic":"",
+                    "scan_topic":"scan","publish_scan_observations":True,"depth_topic":"","depth_origin_frame":"","gps_topic":"",
                     "depth_image_topic":"","depth_camera_info_topic":"","depth_rate_hz":0.0,
                     "terrain_max_age_s":0.30,"surface_topic":"survey_surfaces","surface_max_age_s":2.0,"sensor_adapter":"","slam_adapter":""}
         self.cfg = {k:self.declare_parameter(k,v).value for k,v in defaults.items()}
@@ -72,7 +73,8 @@ class MapObservations(Node):
             self.create_subscription(Odometry,self.cfg["odom_topic"],self.on_odom,qos_profile_sensor_data)
         elif self.cfg["reference_mode"] == "local" and not (self.slam or self.cfg["pose_includes_odometry"]):
             raise ValueError("a local map requires an odometry topic")
-        self.create_subscription(LaserScan,self.cfg["scan_topic"],self.on_scan,qos_profile_sensor_data)
+        if self.cfg["publish_scan_observations"]:
+            self.create_subscription(LaserScan,self.cfg["scan_topic"],self.on_scan,qos_profile_sensor_data)
         if self.cfg["depth_topic"]:
             self.create_subscription(PointCloud2,self.cfg["depth_topic"],lambda m:self.queue("depth",m,m.header.stamp),qos_profile_sensor_data)
         if self.cfg["depth_image_topic"]:
@@ -108,15 +110,8 @@ class MapObservations(Node):
         self.pending.setdefault(name,deque(maxlen=8)).append((Time.from_msg(stamp),msg))
 
     def on_scan(self,msg):
-        if not self.out.get_subscription_count() or self.slam and self.slam.stage != "ready":
-            return
-        stamp = Time.from_msg(msg.header.stamp)
-        if abs(self.get_clock().now().nanoseconds-stamp.nanoseconds) > 0.30e9:
-            return
-        try:
-            self.scan(msg,stamp)
-        except TransformException as exc:
-            self.warn("scan",str(exc))
+        if not self.slam or self.slam.stage == "ready":
+            publish_scan(self,msg,self.cfg,self.tf,self.out)
 
     def on_camera_info(self,msg):
         self.camera_info = msg
@@ -229,25 +224,14 @@ class MapObservations(Node):
         return pose[:3,:3],pose[:3,3]
 
     def send(self,kind,stamp,frame,value,publisher=None):
-        target = self.cfg
-        packet = ContractEnvelope()
-        packet.message_type = "uran.sensors.observation.v1"
-        packet.schema_name = "sensors/observation.schema.json"
-        packet.device_id,packet.component_id,packet.instance_id = target["device_id"],target["component_id"],target["instance_id"]
-        packet.correlation_id = "{}-{}-{}-{}-{}".format(packet.device_id, target["source_component"], packet.instance_id or packet.component_id, kind, stamp)
-        packet.payload_json = json.dumps({"schema_version":"1.0","source":{"device_id":packet.device_id,"component_id":target["source_component"]},
-            "frame_id":frame,"timestamp_ns":stamp,"observation_type":kind,"value":value},allow_nan=False,separators=(",",":"))
-        (self.out if publisher is None else publisher).publish(packet)
+        out = self.out if publisher is None else publisher
+        out.publish(observation_packet(self.cfg,kind,stamp,frame,value))
 
     def warn(self,key,message):
         now = time.monotonic()
         if now-self.last_warning.get(key,-100) > 5:
             self.get_logger().warning(message)
             self.last_warning[key] = now
-
-    def scan(self,msg,stamp):
-        rot,offset = rigid(self.tf.lookup_transform(self.cfg["body_frame"],msg.header.frame_id,stamp).transform)
-        self.send("laser_scan",stamp.nanoseconds,self.cfg["body_frame"],scan_in_body(msg,rot,offset))
 
     def depth(self,name,msg,stamp,task_fresh,publish_surface):
         if stamp.nanoseconds < self.revision_start:

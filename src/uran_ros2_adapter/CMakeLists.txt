@@ -70,6 +70,7 @@ set_property(TARGET uran_runtime_node APPEND PROPERTY BUILD_RPATH "${_uran_nativ
 install(TARGETS ${PROJECT_NAME} EXPORT uran_ros2_adapterTargets
   LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin)
 install(TARGETS uran_runtime_node scan_imu_sync RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/laser_observations.py DESTINATION lib/${PROJECT_NAME} RENAME laser_observations)
 install(PROGRAMS scripts/map_observations.py DESTINATION lib/${PROJECT_NAME} RENAME map_observations)
 install(PROGRAMS scripts/fused_scan.py DESTINATION lib/${PROJECT_NAME} RENAME fused_scan)
 install(PROGRAMS scripts/survey_map.py DESTINATION lib/${PROJECT_NAME} RENAME survey_map)
